@@ -1,0 +1,77 @@
+# =========================
+# Environment & Secrets
+# =========================
+.env
+.env.local
+frontend/.env.local
+
+# =========================
+# Python Virtual Environments
+# =========================
+.venv/
+venv/
+
+# =========================
+# Python Cache Files
+# =========================
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Frontend / Node
+# =========================
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# =========================
+# Database Files
+# =========================
+*.db
+gradeops.db
+
+# =========================
+# Uploads / Outputs / Models
+# =========================
+uploads/
+outputs/
+models_cache/
+
+# =========================
+# Build Files
+# =========================
+dist/
+build/
+*.egg-info/
+
+# =========================
+# IDE / Editor Files
+# =========================
+.vscode/
+.idea/
+.cursor/
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Keep Sample Demo PDFs
+# =========================
+*.pdf
+!samples/
+!samples/**
+!sample pdfs/
+!sample pdfs/**
+
+# =========================
+# Keep Important Config Files
+# =========================
+!.env.example
+!frontend/.env.local.example
