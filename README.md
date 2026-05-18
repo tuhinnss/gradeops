@@ -1,97 +1,373 @@
 # GRADEOPS — Human-in-the-Loop AI Exam Grading
 
-AI-powered handwritten exam evaluation: OCR, rubric matching, partial marking, justifications, plagiarism flags, annotated PDFs, bulk processing, optional auth, and instructor review workflows.
+AI-powered handwritten exam evaluation: OCR, rubric matching, partial marking, justifications, plagiarism flags, annotated PDFs, bulk processing, optional authentication, analytics, and instructor review workflows.
 
 > **Backward compatible:** With `AUTH_ENABLED=false` (default), the original single-upload dashboard and API behave as before.
 
-## Architecture
+---
 
-```
+# Architecture
+
+```text
 PDF Upload → Page Images → Question Segmentation → OCR → Rubric Match → Scoring → Annotated PDF
                                     ↓
                               PostgreSQL (submissions, rubrics, logs)
 ```
 
-## Project structure
+---
 
-| Path | Purpose |
-|------|---------|
-| `app/main.py` | FastAPI app, CORS, lifespan (DB init), routes mount |
-| `app/config.py` | Pydantic settings from `.env` |
-| `app/core/logging.py` | Structured stdout logging |
-| `app/core/exceptions.py` | Domain errors → HTTP exceptions |
-| `app/db/models.py` | SQLAlchemy models: Rubric, StudentSubmission, ExtractedAnswer, EvaluationLog |
-| `app/db/session.py` | Async engine, sessions, `init_db()` |
-| `app/db/crud.py` | Create/read/update helpers |
-| `app/schemas/` | Pydantic request/response models |
-| `app/services/pdf_processor.py` | PDF → PIL images via PyMuPDF |
-| `app/services/layout_segmenter.py` | Question regions (OpenCV + optional LayoutParser) |
-| `app/services/ocr/` | Florence-2, Nougat, Tesseract with fallback chain |
-| `app/services/rubric_parser.py` | JSON/PDF → structured rubric |
-| `app/services/evaluation_engine.py` | Sentence-transformers + cosine similarity scoring |
-| `app/services/plagiarism_detector.py` | Cross-student similarity flags |
-| `app/services/pdf_annotator.py` | Marks & comments on PDF (PyMuPDF) |
-| `app/services/pipeline.py` | End-to-end orchestration |
-| `app/api/routes/upload.py` | Upload answer sheet & rubric |
-| `app/api/routes/evaluate.py` | Run OCR + evaluation |
-| `app/api/routes/results.py` | JSON results, annotated PDF, report |
-| `samples/example_rubric.json` | Sample marking scheme |
-| `docker-compose.yml` | PostgreSQL + API |
-| `frontend/` | Next.js 14 + Tailwind UI (uploads, results, annotated PDF) |
-| `scripts/api_examples.*` | curl / PowerShell examples |
+# Tech Stack
 
-## Quick start (local)
+| Layer          | Technology                         |
+| -------------- | ---------------------------------- |
+| Backend        | FastAPI                            |
+| Frontend       | Next.js 14 + Tailwind              |
+| OCR            | Florence-2 / Nougat / Tesseract    |
+| Database       | PostgreSQL                         |
+| ORM            | SQLAlchemy                         |
+| ML Models      | Sentence Transformers              |
+| Authentication | JWT                                |
+| Deployment     | Docker / Render / Railway / Vercel |
 
-### 1. Prerequisites
+---
 
-- Python 3.11+
-- PostgreSQL 14+ (or Docker)
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) on PATH (fallback engine)
-- Optional: CUDA GPU for Florence-2 / Nougat
+# Project Structure
 
-### 2. Setup
+| Path                                  | Purpose                                             |
+| ------------------------------------- | --------------------------------------------------- |
+| `app/main.py`                         | FastAPI app, CORS, lifespan (DB init), routes mount |
+| `app/config.py`                       | Pydantic settings from `.env`                       |
+| `app/core/logging.py`                 | Structured stdout logging                           |
+| `app/core/exceptions.py`              | Domain errors → HTTP exceptions                     |
+| `app/db/models.py`                    | SQLAlchemy models                                   |
+| `app/db/session.py`                   | Async engine, sessions, `init_db()`                 |
+| `app/db/crud.py`                      | Database helpers                                    |
+| `app/schemas/`                        | Pydantic request/response models                    |
+| `app/services/pdf_processor.py`       | PDF → PIL images                                    |
+| `app/services/layout_segmenter.py`    | Question segmentation                               |
+| `app/services/ocr/`                   | OCR engines + fallback chain                        |
+| `app/services/rubric_parser.py`       | Rubric parsing                                      |
+| `app/services/evaluation_engine.py`   | Similarity scoring                                  |
+| `app/services/plagiarism_detector.py` | Plagiarism detection                                |
+| `app/services/pdf_annotator.py`       | Annotated PDF generation                            |
+| `app/services/pipeline.py`            | End-to-end orchestration                            |
+| `frontend/`                           | Next.js frontend                                    |
+| `tests/`                              | Unit/integration tests                              |
+| `samples/`                            | Sample rubric files                                 |
+| `sample_pdfs/`                        | Sample answer sheets                                |
+| `docker-compose.yml`                  | PostgreSQL + API setup                              |
+
+---
+
+# Features
+
+* AI-powered handwritten exam grading
+* OCR extraction pipeline
+* Rubric-based evaluation
+* Partial marking support
+* Confidence scoring
+* Plagiarism detection
+* Annotated PDF generation
+* Bulk answer-sheet processing
+* Analytics dashboard
+* Human-in-the-loop review system
+* Optional authentication system
+* Docker support
+* Multiple OCR engine fallback
+
+---
+
+# Quick Start (Local)
+
+## 1. Clone the Repository
+
+Open PowerShell / Terminal:
 
 ```bash
-cd "d:\gradeops project"
+git clone https://github.com/PIYUSH-bit1818/gradeops-cc.git
+cd gradeops-cc
+```
+
+You can clone the project anywhere on your system.
+
+Examples:
+
+* `D:\Projects\gradeops-cc`
+* `C:\Users\YourName\Desktop\gradeops-cc`
+
+---
+
+# 2. Install Python
+
+Install:
+
+* Python 3.11+
+
+Download:
+
+* https://www.python.org/downloads/
+
+During installation:
+
+✅ Enable:
+
+```text
+Add Python to PATH
+```
+
+Verify installation:
+
+```bash
+python --version
+```
+
+---
+
+# 3. Install PostgreSQL + pgAdmin
+
+Download PostgreSQL:
+
+* https://www.postgresql.org/download/windows/
+
+During installation:
+
+| Setting  | Recommended Value        |
+| -------- | ------------------------ |
+| Port     | `5432`                   |
+| Username | `postgres`               |
+| Password | Create your own password |
+
+⚠️ Remember the password you create during installation.
+
+pgAdmin 4 will automatically install with PostgreSQL.
+
+---
+
+# 4. Create Database in pgAdmin
+
+Open:
+
+```text
+pgAdmin 4
+```
+
+Then:
+
+1. Expand:
+
+```text
+Servers → PostgreSQL
+```
+
+2. Right click:
+
+```text
+Databases → Create → Database
+```
+
+3. Database name:
+
+```text
+gradeops
+```
+
+4. Click Save
+
+---
+
+# 5. Create Virtual Environment
+
+Inside project folder:
+
+```bash
 python -m venv .venv
-.venv\Scripts\activate          # Windows
+```
+
+Activate virtual environment:
+
+### Windows
+
+```bash
+.\.venv\Scripts\activate
+```
+
+### Linux / Mac
+
+```bash
+source .venv/bin/activate
+```
+
+---
+
+# 6. Install Backend Dependencies
+
+```bash
 pip install -r requirements.txt
+```
+
+---
+
+# 7. Configure Environment Variables
+
+Copy environment file:
+
+### Windows
+
+```bash
 copy .env.example .env
 ```
 
-Start PostgreSQL, then:
+### Linux / Mac
+
+```bash
+cp .env.example .env
+```
+
+Open `.env`
+
+Update this line:
+
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:YOUR_PASSWORD@localhost:5432/gradeops
+```
+
+Replace:
+
+```text
+YOUR_PASSWORD
+```
+
+with your PostgreSQL password.
+
+Example:
+
+```env
+DATABASE_URL=postgresql+asyncpg://postgres:mypassword123@localhost:5432/gradeops
+```
+
+---
+
+# 8. Start Backend Server
+
+Run:
 
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Open **http://localhost:8000/docs** for interactive API docs.
+If successful, you should see:
 
-## Frontend (Next.js)
+```text
+Application startup complete
+```
 
-The web UI lives in `frontend/`: upload marking scheme (JSON/PDF), upload student answer PDFs, run evaluation, open **question breakdown** (marks + AI remarks per question), and download **annotated PDFs**.
+Backend URL:
+
+```text
+http://localhost:8000
+```
+
+Swagger API Docs:
+
+```text
+http://localhost:8000/docs
+```
+
+---
+
+# 9. Frontend Setup
+
+Open a NEW terminal.
+
+Go to frontend folder:
 
 ```bash
 cd frontend
-copy .env.local.example .env.local
+```
+
+Install frontend dependencies:
+
+```bash
 npm install
+```
+
+Start frontend:
+
+```bash
 npm run dev
 ```
 
-Then open **http://localhost:3000**. Set `NEXT_PUBLIC_API_URL` in `.env.local` to your FastAPI base (default `http://localhost:8000`). The backend `CORS_ORIGINS` already includes `http://localhost:3000`.
+Frontend URL:
 
-## Docker (backend)
-
-```bash
-copy .env.example .env
-docker compose up --build
+```text
+http://localhost:3000
 ```
 
-Docker defaults to `OCR_ENGINE=tesseract` for faster startup. For Florence-2, set `OCR_ENGINE=florence2` and mount GPU if available.
+---
 
-## API workflow
+# 10. Running the Full Project
 
-### 1. Upload rubric
+Keep BOTH terminals running simultaneously.
+
+## Terminal 1 — Backend
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+## Terminal 2 — Frontend
+
+```bash
+npm run dev
+```
+
+---
+
+# 11. OCR Requirements
+
+GRADEOPS uses OCR for handwritten answer extraction.
+
+Recommended OCR:
+
+* Tesseract OCR
+
+Download:
+
+* https://github.com/tesseract-ocr/tesseract
+
+After installation, ensure Tesseract is added to PATH.
+
+Verify installation:
+
+```bash
+tesseract --version
+```
+
+---
+
+# Frontend (Next.js)
+
+The frontend dashboard supports:
+
+* Rubric upload
+* Answer-sheet upload
+* Bulk evaluation
+* Result visualization
+* Annotated PDF preview/download
+* Analytics dashboard
+* Human review workflows
+
+Frontend path:
+
+```text
+frontend/
+```
+
+---
+
+# API Workflow
+
+## 1. Upload Rubric
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/upload/rubric" \
@@ -99,7 +375,9 @@ curl -X POST "http://localhost:8000/api/v1/upload/rubric" \
   -F "name=Midterm"
 ```
 
-### 2. Upload answer sheet
+---
+
+## 2. Upload Answer Sheet
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/upload/answer-sheet" \
@@ -108,7 +386,9 @@ curl -X POST "http://localhost:8000/api/v1/upload/answer-sheet" \
   -F "rubric_id=<RUBRIC_UUID>"
 ```
 
-### 3. Evaluate
+---
+
+## 3. Run Evaluation
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/evaluate/run" \
@@ -116,13 +396,19 @@ curl -X POST "http://localhost:8000/api/v1/evaluate/run" \
   -d "{\"submission_id\": \"<SUBMISSION_UUID>\", \"rubric_id\": \"<RUBRIC_UUID>\"}"
 ```
 
-### 4. Results & annotated PDF
+---
 
-- `GET /api/v1/results/{submission_id}` — full JSON
-- `GET /api/v1/results/{submission_id}/annotated-pdf` — download PDF
-- `GET /api/v1/results/{submission_id}/generate-report` — OCR + logs + evaluation
+## 4. Download Results
 
-## Output example
+Endpoints:
+
+* `GET /api/v1/results/{submission_id}`
+* `GET /api/v1/results/{submission_id}/annotated-pdf`
+* `GET /api/v1/results/{submission_id}/generate-report`
+
+---
+
+# Example Output
 
 ```json
 {
@@ -132,7 +418,7 @@ curl -X POST "http://localhost:8000/api/v1/evaluate/run" \
       "question": "Q1",
       "marks_awarded": 4.0,
       "max_marks": 5.0,
-      "justification": "Awarded 4.0/5.0 marks for Q1. Matched key points: ...",
+      "justification": "Awarded 4.0/5.0 marks for Q1.",
       "confidence": 0.89,
       "is_blank": false
     }
@@ -142,7 +428,9 @@ curl -X POST "http://localhost:8000/api/v1/evaluate/run" \
 }
 ```
 
-## Rubric JSON format
+---
+
+# Rubric JSON Format
 
 ```json
 {
@@ -154,72 +442,248 @@ curl -X POST "http://localhost:8000/api/v1/evaluate/run" \
       "key_points": ["Point 1", "Point 2"],
       "negative_conditions": ["Wrong formula"],
       "partial_credit_rules": [
-        { "condition": "Partial explanation", "marks": 2 }
+        {
+          "condition": "Partial explanation",
+          "marks": 2
+        }
       ]
     }
   ]
 }
 ```
 
-## OCR engines
+---
 
-| Engine | Config `OCR_ENGINE` | Notes |
-|--------|---------------------|-------|
-| Florence-2 | `florence2` | Default; best for handwriting (GPU recommended) |
-| Nougat | `nougat` | Academic documents |
-| Tesseract | `tesseract` | Fast CPU fallback |
+# OCR Engines
 
-Fallback chain: primary → Florence → Nougat → Tesseract.
+| Engine     | Config      | Notes                |
+| ---------- | ----------- | -------------------- |
+| Florence-2 | `florence2` | Best handwriting OCR |
+| Nougat     | `nougat`    | Academic documents   |
+| Tesseract  | `tesseract` | Fast CPU fallback    |
 
-## Environment variables
+Fallback chain:
 
-See `.env.example` for all options. Key settings:
-
-- `DATABASE_URL` — async PostgreSQL URL
-- `OCR_ENGINE` / `OCR_DEVICE` — model selection
-- `SIMILARITY_THRESHOLD` — key point match threshold (0–1)
-- `OPENAI_API_KEY` + `USE_LLM_REASONING=true` — optional LLM justifications
-
-## Tests
-
-```bash
-pytest tests/ -v
+```text
+Primary → Florence → Nougat → Tesseract
 ```
 
-Unit tests cover rubric parsing, evaluation logic, and health endpoint (DB mocked).
+---
 
-## Phase 2 features
+# Environment Variables
 
-| Feature | Endpoints | Notes |
-|---------|-----------|-------|
-| Bulk upload | `POST /api/v1/bulk/answer-sheets`, `/bulk/answer-sheets/zip` | Multi-PDF or ZIP; auto student IDs from filenames |
-| Batch queue | `POST /api/v1/bulk/jobs`, `GET /api/v1/bulk/jobs/{id}` | Async evaluation with progress |
-| Auth (optional) | `/api/v1/auth/register`, `/login`, `/me` | Set `AUTH_ENABLED=true` |
-| Review (HITL) | `GET/POST /api/v1/review/{submission_id}` | Approve, reject, override marks |
-| Analytics | `GET /api/v1/analytics/rubric/{id}` | Averages, toppers, pass/fail |
-| Plagiarism report | `GET /api/v1/analytics/rubric/{id}/plagiarism` | Cohort flags |
-| Optional AI | `AI_BACKEND=openai\|gemini\|huggingface` | Heuristic grading remains default |
-| S3 storage | `STORAGE_BACKEND=s3` | Local disk fallback |
+See `.env.example` for all available settings.
 
-### Frontend pages
+Important variables:
 
-- `/` — Dashboard (single + bulk upload, review panel)
-- `/analytics` — Charts (Recharts)
-- `/login`, `/signup` — When auth is enabled
+| Variable               | Purpose               |
+| ---------------------- | --------------------- |
+| `DATABASE_URL`         | PostgreSQL connection |
+| `OCR_ENGINE`           | OCR model selection   |
+| `OCR_DEVICE`           | CPU/GPU               |
+| `SIMILARITY_THRESHOLD` | Matching threshold    |
+| `AI_BACKEND`           | Optional LLM backend  |
+| `AUTH_ENABLED`         | Enable authentication |
 
-### Migrations
+---
+
+# Docker Setup
+
+Copy environment file:
+
+```bash
+copy .env.example .env
+```
+
+Start Docker:
+
+```bash
+docker compose up --build
+```
+
+---
+
+# Database Migrations
 
 ```bash
 alembic upgrade head
 ```
 
-Tables are also created on startup via `init_db()` for local dev.
+Tables are also automatically created during startup via:
 
-### Deployment
+```python
+init_db()
+```
 
-- **API:** Docker Compose, [Render](https://render.com), or [Railway](https://railway.app) — use `DATABASE_URL` + `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-- **Frontend:** [Vercel](https://vercel.com) — root `frontend/`, env `NEXT_PUBLIC_API_URL`
+---
 
-## Next steps
+# Running Tests
 
-Upload a **sample handwritten answer PDF** and **marking scheme** to validate end-to-end accuracy. Use `samples/quiz2_ma201_rubric.json` for reliable typed-rubric demos.
+```bash
+pytest tests/ -v
+```
+
+Tests include:
+
+* rubric parsing
+* evaluation logic
+* API health checks
+* OCR pipeline tests
+
+---
+
+# Common Errors & Fixes
+
+## PostgreSQL Authentication Error
+
+Error:
+
+```text
+password authentication failed for user "postgres"
+```
+
+Fix:
+
+* Verify PostgreSQL password
+* Update `.env`
+* Restart backend
+
+---
+
+## Port Already in Use
+
+Frontend:
+
+```bash
+npm run dev -- -p 3001
+```
+
+Backend:
+
+```bash
+uvicorn app.main:app --reload --port 8001
+```
+
+---
+
+## Missing Python Packages
+
+Run again:
+
+```bash
+pip install -r requirements.txt
+```
+
+inside activated virtual environment.
+
+---
+
+## Node Modules Error
+
+Delete:
+
+```text
+node_modules/
+```
+
+Then reinstall:
+
+```bash
+npm install
+```
+
+---
+
+# Verify Setup
+
+## Backend API
+
+Open:
+
+```text
+http://localhost:8000/docs
+```
+
+## Frontend
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+## Full Workflow Test
+
+1. Upload rubric
+2. Upload handwritten PDF
+3. Run evaluation
+4. Download annotated PDF
+
+If all work successfully, setup is complete.
+
+---
+
+# Deployment
+
+## Backend
+
+Supported platforms:
+
+* Docker Compose
+* Render
+* Railway
+
+Start command:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+---
+
+## Frontend
+
+Recommended:
+
+* Vercel
+
+Root directory:
+
+```text
+frontend/
+```
+
+Environment variable:
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+---
+
+# Future Improvements
+
+* Better handwriting OCR
+* GPU acceleration
+* Cloud deployment
+* Real-time evaluation queue
+* Advanced analytics
+* Teacher dashboard enhancements
+* LLM-powered reasoning
+
+---
+
+# Next Steps
+
+Upload:
+
+* sample handwritten answer PDFs
+* rubric JSON/PDF
+
+to validate end-to-end evaluation accuracy.
+
+Recommended sample:
+
+```text
+samples/quiz2_ma201_rubric.json
+```
