@@ -1,0 +1,58 @@
+{
+  "title": "Quiz 2 MA201 Mathematics III",
+  "items": [
+    {
+      "question_number": "Q1",
+      "max_marks": 2,
+      "key_points": [
+        "Orthogonal surfaces PDE from integral surface",
+        "Gradient dot product equals zero"
+      ]
+    },
+    {
+      "question_number": "Q2",
+      "max_marks": 4,
+      "key_points": [
+        "Auxiliary equations for PDE",
+        "First integral C1",
+        "Second integral C2",
+        "Surface through given circle"
+      ]
+    },
+    {
+      "question_number": "Q3",
+      "max_marks": 2,
+      "key_points": [
+        "Separation of variables solution",
+        "No solution exists for given initial condition"
+      ]
+    },
+    {
+      "question_number": "Q4",
+      "max_marks": 3,
+      "key_points": [
+        "Discriminant B squared minus 4AC",
+        "Classification elliptic on hyperbola",
+        "Classification hyperbolic on parabola",
+        "Classification parabolic on line"
+      ]
+    },
+    {
+      "question_number": "Q5",
+      "max_marks": 1,
+      "key_points": [
+        "D Alembert solution with zero initial displacement",
+        "Integral of cos s"
+      ]
+    },
+    {
+      "question_number": "Q6",
+      "max_marks": 3,
+      "key_points": [
+        "Fourier series odd function coefficients",
+        "Series for f at pi/2",
+        "Sum equals pi/4"
+      ]
+    }
+  ]
+}

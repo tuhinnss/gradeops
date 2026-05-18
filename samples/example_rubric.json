@@ -1,0 +1,46 @@
+{
+  "title": "Sample Physics Exam",
+  "items": [
+    {
+      "question_number": "Q1",
+      "max_marks": 5,
+      "key_points": [
+        "States Newton's second law as F equals ma",
+        "Explains relationship between force mass and acceleration",
+        "Provides a numerical example with correct units"
+      ],
+      "negative_conditions": [
+        "States incorrect formula F equals m divided by a"
+      ],
+      "partial_credit_rules": [
+        { "condition": "Mentions force and acceleration without full derivation", "marks": 2 }
+      ]
+    },
+    {
+      "question_number": "Q2",
+      "max_marks": 5,
+      "key_points": [
+        "Defines kinetic energy as one half m v squared",
+        "Calculates kinetic energy with given values",
+        "Uses correct SI units joules"
+      ],
+      "negative_conditions": [],
+      "partial_credit_rules": [
+        { "condition": "Correct formula but arithmetic error", "marks": 3 }
+      ]
+    },
+    {
+      "question_number": "Q3",
+      "max_marks": 10,
+      "key_points": [
+        "Draws free body diagram with labeled forces",
+        "Applies conservation of energy",
+        "Solves for final velocity correctly"
+      ],
+      "negative_conditions": [
+        "Missing units in final answer"
+      ],
+      "partial_credit_rules": []
+    }
+  ]
+}
