@@ -360,14 +360,15 @@ export async function getReviewState(submissionId: string): Promise<ReviewState>
 
 export async function submitReviewAction(
   submissionId: string,
-  action: "approve" | "reject" | "override",
+  action: "approve" | "reject" | "override" | "escalate",
   notes?: string,
-  overrides?: { question: string; marks_awarded: number; justification?: string }[]
+  overrides?: { question: string; marks_awarded: number; justification?: string }[],
+  reason?: string
 ): Promise<ReviewState> {
   const res = await fetch(apiUrl(`${API_PREFIX}/review/${submissionId}/action`), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ action, notes, overrides: overrides ?? [] }),
+    body: JSON.stringify({ action, notes, reason, overrides: overrides ?? [] }),
   });
   if (!res.ok) throw new Error(formatError(await safeJson(res), res.statusText));
   return res.json();
@@ -383,16 +384,12 @@ export async function login(email: string, password: string) {
   return res.json();
 }
 
-export async function register(
-  email: string,
-  password: string,
-  fullName: string,
-  role: "instructor" | "ta" = "ta"
-) {
+/** Self-registration always creates a TA account (professors are provisioned). */
+export async function register(email: string, password: string, fullName: string) {
   const res = await fetch(apiUrl(`${API_PREFIX}/auth/register`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, full_name: fullName, role }),
+    body: JSON.stringify({ email, password, full_name: fullName }),
   });
   if (!res.ok) throw new Error(formatError(await safeJson(res), res.statusText));
   return res.json();

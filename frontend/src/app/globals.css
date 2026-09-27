@@ -2,22 +2,67 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Light theme */
 :root {
-  --bg: #07080a;
-  --fg: #e8eaef;
-  --muted: #8b92a5;
+  --c-bg: 244 245 248;
+  --c-surface: 255 255 255;
+  --c-surface-raised: 249 250 252;
+  --c-surface-sunken: 238 240 244;
+  --c-line: 225 228 235;
+  --c-line-strong: 203 208 218;
+  --c-fg: 17 24 39;
+  --c-fg-muted: 71 80 97;
+  --c-fg-subtle: 107 114 131;
+  --c-accent: 37 99 235;
+  --c-accent-strong: 29 78 216;
+  --c-accent-soft: 219 234 254;
+  /* Data-viz tokens (validated: single series + ordinal blue ramp, light surface) */
+  --viz-series: #2a78d6;
+  --viz-grid: #eceef2;
+  --viz-ord-high: #1c5cab;
+  --viz-ord-mid: #3987e5;
+  --viz-ord-low: #86b6ef;
+  color-scheme: light;
+}
+
+/* Dark theme (default; matches the original GRADEOPS look) */
+.dark {
+  --c-bg: 8 9 12;
+  --c-surface: 16 18 23;
+  --c-surface-raised: 22 25 31;
+  --c-surface-sunken: 12 13 17;
+  --c-line: 36 40 50;
+  --c-line-strong: 52 58 72;
+  --c-fg: 231 233 238;
+  --c-fg-muted: 160 166 180;
+  --c-fg-subtle: 110 117 134;
+  --c-accent: 59 130 246;
+  --c-accent-strong: 96 165 250;
+  --c-accent-soft: 23 37 84;
+  /* Dark steps chosen for the dark surface (not an automatic flip) */
+  --viz-series: #3987e5;
+  --viz-grid: #22262f;
+  --viz-ord-high: #86b6ef;
+  --viz-ord-mid: #3987e5;
+  --viz-ord-low: #1c5cab;
+  color-scheme: dark;
 }
 
 body {
-  @apply min-h-screen bg-[var(--bg)] text-[var(--fg)] antialiased;
+  @apply min-h-screen bg-bg text-fg antialiased;
 }
 
-/* subtle grid */
+/* Legacy workbench pages keep their original dark styling. */
+.legacy-dark {
+  @apply min-h-screen bg-[#07080a] text-[#e8eaef];
+}
+
 .bg-grid {
-  background-image: linear-gradient(
-      rgba(255, 255, 255, 0.03) 1px,
-      transparent 1px
-    ),
+  background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
   background-size: 48px 48px;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
 }
