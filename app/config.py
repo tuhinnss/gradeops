@@ -17,12 +17,17 @@ class Settings(BaseSettings):
 
     app_name: str = "GRADEOPS"
     debug: bool = False
+    # development | test | production. Production refuses insecure defaults.
+    environment: Literal["development", "test", "production"] = "development"
     api_prefix: str = "/api/v1"
 
     database_url: str = Field(
         default="postgresql+asyncpg://gradeops:gradeops@localhost:5432/gradeops",
         description="Async SQLAlchemy database URL",
     )
+    # Schema is managed by Alembic (`alembic upgrade head`). Only enable this for
+    # throwaway local experiments; it runs `create_all` on startup.
+    db_auto_create: bool = False
 
     upload_dir: Path = Path("uploads")
     output_dir: Path = Path("outputs")
@@ -46,6 +51,10 @@ class Settings(BaseSettings):
     similarity_threshold: float = 0.55
     blank_answer_min_chars: int = 3
     plagiarism_similarity_threshold: float = 0.92
+    # What to do when the sentence-embedding model cannot be loaded (offline host):
+    # "lexical" = grade with keyword matching only (reduced confidence, flagged);
+    # "error" = fail the evaluation.
+    embedding_fallback: Literal["lexical", "error"] = "lexical"
 
     # AI backends (all optional — heuristic grading remains default)
     ai_backend: Literal["none", "openai", "gemini", "huggingface"] = "none"
@@ -61,11 +70,17 @@ class Settings(BaseSettings):
     max_upload_mb: int = 50
     batch_max_workers: int = 2
 
-    # Auth (disabled by default for local MVP compatibility)
-    auth_enabled: bool = False
+    # Auth is ON by default. AUTH_ENABLED=false re-enables the legacy anonymous
+    # single-user workbench endpoints (local demos only — anyone can read any
+    # submission). Role dashboards (/professor, /ta) always require login.
+    auth_enabled: bool = True
+    # Self-registration only ever creates TA accounts (no course access until a
+    # professor adds them). Professors are provisioned via scripts/create_user.py.
+    allow_self_registration: bool = True
     jwt_secret_key: str = "change-me-in-production-use-openssl-rand"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24
+    bcrypt_rounds: int = Field(default=12, ge=4, le=16)
 
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 

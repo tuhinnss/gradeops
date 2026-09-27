@@ -4,10 +4,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
+    HUMAN_REVIEWED_STATUSES,
+    TA_QUEUE_STATUSES,
     BatchJob,
     BatchJobStatus,
     EvaluationLog,
@@ -60,6 +62,13 @@ async def list_users(session: AsyncSession, skip: int = 0, limit: int = 50) -> l
     return list(result.scalars().all())
 
 
+async def update_user(session: AsyncSession, user: User, **fields: Any) -> User:
+    for key, value in fields.items():
+        setattr(user, key, value)
+    await session.flush()
+    return user
+
+
 # --- Rubrics ---
 
 
@@ -71,6 +80,7 @@ async def create_rubric(
     source_type: str,
     structured_data: dict,
     file_path: str | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> Rubric:
     rubric = Rubric(
         name=name,
@@ -78,6 +88,7 @@ async def create_rubric(
         source_type=source_type,
         structured_data=structured_data,
         file_path=file_path,
+        owner_id=owner_id,
     )
     session.add(rubric)
     await session.flush()
@@ -100,6 +111,10 @@ async def create_submission(
     file_path: str,
     rubric_id: uuid.UUID | None = None,
     batch_job_id: uuid.UUID | None = None,
+    uploaded_by: uuid.UUID | None = None,
+    course_id: uuid.UUID | None = None,
+    exam_id: uuid.UUID | None = None,
+    student_record_id: uuid.UUID | None = None,
 ) -> StudentSubmission:
     submission = StudentSubmission(
         student_id=student_id,
@@ -107,8 +122,12 @@ async def create_submission(
         file_path=file_path,
         rubric_id=rubric_id,
         batch_job_id=batch_job_id,
+        uploaded_by=uploaded_by,
+        course_id=course_id,
+        exam_id=exam_id,
+        student_record_id=student_record_id,
         status=SubmissionStatus.UPLOADED,
-        review_status=ReviewStatus.PENDING,
+        review_status=ReviewStatus.NOT_EVALUATED,
     )
     session.add(submission)
     await session.flush()
@@ -130,8 +149,11 @@ async def list_submissions(
     review_status: ReviewStatus | None = None,
     skip: int = 0,
     limit: int = 100,
+    scope: ColumnElement[bool] | None = None,
 ) -> list[StudentSubmission]:
     q = select(StudentSubmission)
+    if scope is not None:
+        q = q.where(scope)
     if rubric_id:
         q = q.where(StudentSubmission.rubric_id == rubric_id)
     if batch_job_id:
@@ -143,8 +165,14 @@ async def list_submissions(
     return list(result.scalars().all())
 
 
-async def count_submissions(session: AsyncSession, rubric_id: uuid.UUID | None = None) -> int:
+async def count_submissions(
+    session: AsyncSession,
+    rubric_id: uuid.UUID | None = None,
+    scope: ColumnElement[bool] | None = None,
+) -> int:
     q = select(func.count()).select_from(StudentSubmission)
+    if scope is not None:
+        q = q.where(scope)
     if rubric_id:
         q = q.where(StudentSubmission.rubric_id == rubric_id)
     result = await session.execute(q)
@@ -160,6 +188,24 @@ async def update_submission(
         setattr(submission, key, value)
     await session.flush()
     return submission
+
+
+async def delete_extracted_answers(session: AsyncSession, submission_id: uuid.UUID) -> None:
+    """Remove OCR rows from a previous run so re-processing does not duplicate them."""
+    await session.execute(
+        delete(ExtractedAnswer).where(ExtractedAnswer.submission_id == submission_id)
+    )
+
+
+async def list_extracted_answers(
+    session: AsyncSession, submission_id: uuid.UUID
+) -> list[ExtractedAnswer]:
+    result = await session.execute(
+        select(ExtractedAnswer)
+        .where(ExtractedAnswer.submission_id == submission_id)
+        .order_by(ExtractedAnswer.page_index, ExtractedAnswer.question_number)
+    )
+    return list(result.scalars().all())
 
 
 async def save_extracted_answers(
@@ -202,6 +248,17 @@ async def add_evaluation_log(
     return log
 
 
+async def list_evaluation_logs(
+    session: AsyncSession, submission_id: uuid.UUID
+) -> list[EvaluationLog]:
+    result = await session.execute(
+        select(EvaluationLog)
+        .where(EvaluationLog.submission_id == submission_id)
+        .order_by(EvaluationLog.created_at)
+    )
+    return list(result.scalars().all())
+
+
 # --- Batch jobs ---
 
 
@@ -212,9 +269,11 @@ async def create_batch_job(
     submission_ids: list[str],
     run_plagiarism: bool = True,
     created_by: uuid.UUID | None = None,
+    exam_id: uuid.UUID | None = None,
 ) -> BatchJob:
     job = BatchJob(
         rubric_id=rubric_id,
+        exam_id=exam_id,
         submission_ids=submission_ids,
         total_count=len(submission_ids),
         run_plagiarism=run_plagiarism,
@@ -253,6 +312,10 @@ async def add_review_audit(
     old_remarks: str | None = None,
     new_remarks: str | None = None,
     notes: str | None = None,
+    reason: str | None = None,
+    actor_role: str | None = None,
+    from_status: str | None = None,
+    to_status: str | None = None,
 ) -> ReviewAudit:
     audit = ReviewAudit(
         submission_id=submission_id,
@@ -264,6 +327,13 @@ async def add_review_audit(
         old_remarks=old_remarks,
         new_remarks=new_remarks,
         notes=notes,
+        reason=reason,
+        actor_role=actor_role,
+        from_status=from_status,
+        to_status=to_status,
+        # Application clock, not the DB's transaction-scoped now(): several audit
+        # rows written in one transaction must keep their order.
+        created_at=datetime.now(UTC),
     )
     session.add(audit)
     await session.flush()
@@ -291,9 +361,11 @@ async def save_plagiarism_report(
     flags: list[dict],
     matrix: dict | None = None,
     batch_job_id: uuid.UUID | None = None,
+    exam_id: uuid.UUID | None = None,
 ) -> PlagiarismReport:
     report = PlagiarismReport(
         rubric_id=rubric_id,
+        exam_id=exam_id,
         batch_job_id=batch_job_id,
         flags=flags,
         matrix=matrix,
@@ -318,8 +390,12 @@ async def get_latest_plagiarism_report(
 # --- Analytics ---
 
 
-async def analytics_for_rubric(session: AsyncSession, rubric_id: uuid.UUID) -> dict:
-    subs = await list_submissions(session, rubric_id=rubric_id, limit=500)
+async def analytics_for_rubric(
+    session: AsyncSession,
+    rubric_id: uuid.UUID,
+    scope: ColumnElement[bool] | None = None,
+) -> dict:
+    subs = await list_submissions(session, rubric_id=rubric_id, limit=500, scope=scope)
     evaluated = [s for s in subs if s.evaluation_result and s.status == SubmissionStatus.EVALUATED]
 
     if not evaluated:
@@ -372,6 +448,6 @@ async def analytics_for_rubric(session: AsyncSession, rubric_id: uuid.UUID) -> d
         },
         "hardest_question": hardest,
         "easiest_question": easiest,
-        "review_pending": sum(1 for s in evaluated if s.review_status == ReviewStatus.PENDING),
-        "review_approved": sum(1 for s in evaluated if s.review_status == ReviewStatus.APPROVED),
+        "review_pending": sum(1 for s in evaluated if s.review_status in TA_QUEUE_STATUSES),
+        "review_approved": sum(1 for s in evaluated if s.review_status in HUMAN_REVIEWED_STATUSES),
     }

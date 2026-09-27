@@ -4,20 +4,33 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.config import get_settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt only uses the first 72 bytes of a password; newer bcrypt releases raise
+# instead of truncating silently, so truncate explicitly (same result as before).
+_BCRYPT_MAX_BYTES = 72
+
+
+def _password_bytes(password: str) -> bytes:
+    return password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    # Uses the bcrypt library directly: passlib 1.7.4 is unmaintained and crashes
+    # with bcrypt>=4.1. Output is a standard $2b$ hash, compatible with hashes
+    # previously produced through passlib.
+    rounds = get_settings().bcrypt_rounds
+    return bcrypt.hashpw(_password_bytes(password), bcrypt.gensalt(rounds)).decode("ascii")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    try:
+        return bcrypt.checkpw(_password_bytes(plain), hashed.encode("ascii"))
+    except ValueError:
+        return False
 
 
 def create_access_token(subject: str | UUID, extra: dict[str, Any] | None = None) -> str:
