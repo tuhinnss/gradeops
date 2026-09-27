@@ -1,20 +1,30 @@
-import Link from "next/link";
+"use client";
 
+import Link from "next/link";
+import { homeForRole } from "@/lib/roles";
+import { useSession } from "@/lib/session";
+
+/** Navigation for the legacy workbench pages. */
 export function AppNav() {
+  const session = useSession();
   return (
     <nav className="flex flex-wrap gap-3 text-sm">
-      <Link href="/" className="text-zinc-400 transition hover:text-white">
-        Dashboard
+      {session.status === "authenticated" && (
+        <Link href={homeForRole(session.user.role)} className="text-zinc-400 transition hover:text-white">
+          ← Dashboard
+        </Link>
+      )}
+      <Link href="/workbench" className="text-zinc-400 transition hover:text-white">
+        Workbench
       </Link>
       <Link href="/analytics" className="text-zinc-400 transition hover:text-white">
-        Analytics
+        Rubric analytics
       </Link>
-      <Link href="/login" className="text-zinc-400 transition hover:text-white">
-        Login
-      </Link>
-      <Link href="/signup" className="text-zinc-400 transition hover:text-white">
-        Sign up
-      </Link>
+      {session.status !== "authenticated" && (
+        <Link href="/login" className="text-zinc-400 transition hover:text-white">
+          Sign in
+        </Link>
+      )}
     </nav>
   );
 }

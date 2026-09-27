@@ -1,77 +1,75 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { login } from "@/lib/api";
-import { setToken } from "@/lib/auth";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { AuthCard } from "@/components/layout/AuthCard";
+import { Alert, Button, Input, Label } from "@/components/ui";
+import { safeNextPath } from "@/lib/roles";
+import { useSession } from "@/lib/session";
 
-export default function LoginPage() {
+function LoginForm() {
+  const session = useSession();
   const router = useRouter();
+  const next = useSearchParams().get("next");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Signed in (already, or just now via the form): go to the requested page if
+  // this role may open it, otherwise to the role's dashboard.
+  useEffect(() => {
+    if (session.status === "authenticated") router.replace(safeNextPath(next, session.user.role));
+  }, [session.status, session.user, next, router]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const res = await login(email, password);
-      setToken(res.access_token);
-      router.push("/");
+      await session.login(email, password); // the effect above performs the redirect
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
-    } finally {
+      setError(err instanceof Error ? err.message : "Sign-in failed");
       setBusy(false);
     }
   }
 
   return (
-    <div className="bg-grid flex min-h-screen items-center justify-center px-4">
-      <form
-        onSubmit={onSubmit}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-zinc-950/80 p-8 shadow-xl"
-      >
-        <h1 className="text-xl font-semibold text-white">Sign in</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Auth is optional — enable <code className="text-zinc-400">AUTH_ENABLED</code> on the API.
-        </p>
-        {error && <p className="mt-4 text-sm text-rose-400">{error}</p>}
-        <label className="mt-6 block text-xs text-zinc-500">Email</label>
-        <input
-          type="email"
-          required
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="mt-1 w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-white"
-        />
-        <label className="mt-4 block text-xs text-zinc-500">Password</label>
-        <input
-          type="password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="mt-1 w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-white"
-        />
-        <button
-          type="submit"
-          disabled={busy}
-          className="mt-6 w-full rounded-lg bg-sky-600 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-        >
-          {busy ? "Signing in…" : "Sign in"}
-        </button>
-        <p className="mt-4 text-center text-xs text-zinc-500">
-          No account?{" "}
-          <Link href="/signup" className="text-sky-400 hover:underline">
+    <AuthCard title="Sign in" subtitle="Professors and teaching assistants sign in with their university account.">
+      <form onSubmit={onSubmit} className="space-y-4" noValidate>
+        {error && <Alert tone="error">{error}</Alert>}
+        {session.authEnabled === false && (
+          <Alert tone="info">
+            The API is in local demo mode. The single-upload workbench is available <Link href="/" className="underline">without signing in</Link>.
+          </Alert>
+        )}
+        <div>
+          <Label htmlFor="email">Email</Label>
+          <Input id="email" type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
+        </div>
+        <div>
+          <Label htmlFor="password">Password</Label>
+          <Input id="password" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+        </div>
+        <Button type="submit" variant="primary" loading={busy} className="w-full" disabled={!email || !password}>
+          Sign in
+        </Button>
+        <p className="text-center text-xs text-fg-subtle">
+          Teaching assistant without an account?{" "}
+          <Link href="/signup" className="text-accent hover:underline">
             Register
           </Link>
         </p>
-        <Link href="/" className="mt-4 block text-center text-xs text-zinc-600 hover:text-zinc-400">
-          ← Dashboard
-        </Link>
       </form>
-    </div>
+    </AuthCard>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   );
 }

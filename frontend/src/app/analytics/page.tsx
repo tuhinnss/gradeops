@@ -68,7 +68,7 @@ export default function AnalyticsPage() {
     : [];
 
   return (
-    <div className="bg-grid min-h-screen">
+    <div className="legacy-dark bg-grid min-h-screen">
       <header className="border-b border-white/10 bg-black/40 px-4 py-6">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4">
           <div>
@@ -90,8 +90,8 @@ export default function AnalyticsPage() {
               placeholder="From dashboard after rubric upload"
             />
           </label>
-          <Link href="/" className="text-sm text-sky-400 hover:underline">
-            ← Dashboard
+          <Link href="/workbench" className="text-sm text-sky-400 hover:underline">
+            ← Workbench
           </Link>
         </div>
 
@@ -155,7 +155,7 @@ export default function AnalyticsPage() {
             </ChartCard>
 
             {plagiarism.flags?.length > 0 && (
-              <ChartCard title="Suspicious similarity flags">
+              <ChartCard title="Similarity flags (review required)">
                 <ul className="space-y-1 text-xs text-amber-100">
                   {plagiarism.flags.map((f, i) => (
                     <li key={i}>

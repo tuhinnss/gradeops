@@ -34,16 +34,30 @@ export function ReviewPanel({ submissionId, results, onUpdated }: Props) {
   }
 
   async function act(action: "approve" | "reject" | "override") {
+    const ov =
+      action === "override"
+        ? results
+            .filter((r) => (overrides[r.question] ?? r.marks_awarded) !== r.marks_awarded)
+            .map((r) => ({ question: r.question, marks_awarded: overrides[r.question] }))
+        : [];
+    if (action === "override" && ov.length === 0) {
+      alert("Change at least one mark before saving overrides.");
+      return;
+    }
+    if (action === "override" && notes.trim().length < 3) {
+      alert("Add a note explaining the override (it is recorded as the reason).");
+      return;
+    }
     setBusy(true);
     try {
-      const ov =
-        action === "override"
-          ? results.map((r) => ({
-              question: r.question,
-              marks_awarded: overrides[r.question] ?? r.marks_awarded,
-            }))
-          : [];
-      const s = await submitReviewAction(submissionId, action, notes || undefined, ov);
+      // Overrides are audited with a reason; the reviewer note doubles as it here.
+      const s = await submitReviewAction(
+        submissionId,
+        action === "reject" ? "escalate" : action,
+        notes || undefined,
+        ov,
+        action === "override" ? notes.trim() : action === "reject" ? "ai_grading_incorrect" : undefined
+      );
       setStatus(s.review_status);
       onUpdated(s);
     } catch (err) {
@@ -70,7 +84,7 @@ export function ReviewPanel({ submissionId, results, onUpdated }: Props) {
       <textarea
         value={notes}
         onChange={(e) => setNotes(e.target.value)}
-        placeholder="Reviewer notes…"
+        placeholder="Reviewer notes (required as the reason when overriding)…"
         className="mt-2 w-full rounded border border-white/10 bg-black/40 px-2 py-1.5 text-xs text-white"
         rows={2}
       />
@@ -116,7 +130,7 @@ export function ReviewPanel({ submissionId, results, onUpdated }: Props) {
           onClick={() => void act("reject")}
           className="rounded border border-rose-500/40 px-3 py-1 text-xs text-rose-200 hover:bg-rose-950/40 disabled:opacity-50"
         >
-          Reject
+          Flag for re-check
         </button>
       </div>
     </div>
