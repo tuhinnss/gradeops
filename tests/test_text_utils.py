@@ -85,8 +85,12 @@ def test_merge_answers_keeps_longest():
 
 
 def test_section_exam_twenty_five_marks():
-    text = Path("outputs/debug_MID-EXAM_28-02-2023_Final-Solutions.txt").read_text(
-        encoding="utf-8"
+    # Derived from the committed solutions PDF (previously read from a gitignored
+    # debug dump under outputs/, which does not exist on a fresh checkout).
+    from app.services.rubric_parser import RubricParser
+
+    text = RubricParser._extract_native_pdf_text(
+        Path("sample pdfs/sample pdf new/MID-EXAM_28-02-2023_Final-Solutions.pdf")
     )
     blocks = find_question_blocks(text)
     assert len(blocks) == 12
