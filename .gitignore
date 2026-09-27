@@ -75,3 +75,5 @@ Thumbs.db
 # =========================
 !.env.example
 !frontend/.env.local.example
+# TypeScript incremental build info
+frontend/tsconfig.tsbuildinfo

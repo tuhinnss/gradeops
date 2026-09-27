@@ -1,19 +1,21 @@
 # GRADEOPS — Project Status & Development Context
 
-**Last updated:** May 2026  
-**Phase:** 1 (ML + backend + web dashboard) — demo-ready, iterative accuracy improvements ongoing  
-**Purpose of this document:** Onboard future developers and AI sessions without losing architectural or behavioral context.
+**Last updated:** September 2026
+**Phase:** 2 — course/exam hierarchy, role-based Professor and TA dashboards, human review lifecycle
+**Purpose of this document:** Onboard future developers and AI sessions without losing architectural or behavioral context. User-facing setup and workflows live in `README.md`.
 
 ---
 
 ## 1. Project overview
 
-**GRADEOPS** is an AI-assisted handwritten exam grading system (Human-in-the-Loop style). Instructors/TAs upload:
+**GRADEOPS** grades handwritten exam answer sheets with AI and routes every grade through human review.
 
-1. A **marking scheme** (JSON or PDF — often a solutions PDF for typed exams), and  
-2. **Student answer sheets** (PDF scans of handwritten work).
+- A **Professor** owns courses (roster, TAs), exams (rubric, answer sheets, AI evaluation), escalations, similarity flags, the gradebook and finalisation (approve → lock → publish, reopen).
+- A **TA** reviews AI grades only for exams they are assigned to: approve, override (with reason) or escalate, from a keyboard-driven review screen.
+- Review lifecycle (per submission): `NOT_EVALUATED → AI_EVALUATED → TA_PENDING → TA_APPROVED | TA_OVERRIDDEN | ESCALATED → PROFESSOR_APPROVED → PUBLISHED`. Nothing is published without a human approval.
+- Exam lifecycle: `DRAFT → PROCESSING → TA_REVIEW → APPROVED → LOCKED → PUBLISHED` (reopen returns to `TA_REVIEW`).
 
-The system runs OCR, segments answers by question, scores against the rubric, generates justifications, optionally flags plagiarism, and produces an **annotated PDF** plus JSON results. A **Next.js dashboard** drives the workflow without custom backend changes per UI feature.
+The original single-upload workbench (upload rubric + answer sheet → evaluate → annotated PDF) still works at `/workbench` (professors) and, with `AUTH_ENABLED=false`, anonymously at `/`.
 
 **Reference sample files (in repo):**
 
@@ -52,151 +54,117 @@ Global labels: `Q1`–`Q12` in document order (section-local numbers reset; no d
 ## 2. Current architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Frontend (Next.js 14, port 3000)                                       │
-│  frontend/src/components/GradeOpsDashboard.tsx                          │
-│  - Upload rubric / answer PDFs                                          │
-│  - Evaluate, view per-question marks, download annotated PDF            │
-└───────────────────────────────┬─────────────────────────────────────────┘
-                                │ HTTP (NEXT_PUBLIC_API_URL)
-                                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  FastAPI API (port 8000) — app/main.py, prefix /api/v1                  │
-│  upload │ evaluate │ results                                            │
-└───────────────────────────────┬─────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  GradeOpsPipeline (app/services/pipeline.py)                            │
-│  1. PDF → images (PyMuPDF)                                              │
-│  2. Layout segmentation (rubric-guided or OCR markers)                  │
-│  3. OCR per region (Florence-2 / Nougat / Tesseract fallback)           │
-│  4. Merge & dedupe answers (text_utils)                                 │
-│  5. EvaluationEngine + answer_quality heuristics                        │
-│  6. PDF annotation (PyMuPDF)                                            │
-└───────────────────────────────┬─────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  PostgreSQL (async SQLAlchemy + asyncpg)                                │
-│  rubrics, student_submissions, extracted_answers, evaluation_logs       │
-└─────────────────────────────────────────────────────────────────────────┘
+Next.js 14 (frontend/, :3000)
+  /login → GET /auth/me → /professor/* | /ta/*        SessionProvider + RoleGuard + AppShell
+  components/{ui,layout,grading,professor,ta,charts,workbench}
+  lib/api-schema.ts (generated from OpenAPI) · lib/endpoints.ts · lib/client.ts
+        │  Authorization: Bearer <JWT>
+        ▼
+FastAPI (app/, :8000, prefix /api/v1)
+  routes: auth · courses · exams · rubrics · professor · ta · review
+          legacy: upload · bulk · evaluate · results · analytics
+  deps_auth.py    get_current_user, require_role, RequireProfessor/RequireTA/RequireProfessorOrTA
+  permissions.py  require_course/exam/submission_access (404 when inaccessible), SQL scopes
+  services:       review_service (all review actions) · review_queue · finalization ·
+                  analytics_service · integrity · exam_workflow · batch_queue · pipeline
+        │
+        ▼
+GradeOpsPipeline (unchanged flow)
+  PDF → images → question segmentation → OCR (Florence-2 / Nougat / Tesseract)
+  → EvaluationEngine (rubric evidence) → similarity check → annotated PDF
+        │
+        ▼
+PostgreSQL via SQLAlchemy 2 async; schema managed by Alembic
 ```
 
 **Design constraints (do not break without explicit intent):**
 
-- Frontend UI layout and API response shapes are stable for the dashboard.
-- Database schema has not been heavily migrated; tables created via `init_db()` on startup.
-- Grading is **lightweight**: sentence-transformers embeddings + heuristics; **no required LLM** (`USE_LLM_REASONING=false` by default).
+- Authorization lives in the backend. Every data route checks role and ownership/assignment; list endpoints filter in SQL. Inaccessible resources return 404, wrong role 403.
+- All review decisions go through `review_service.apply_review_action` (row lock + optional `expected_review_status`). Do not add a second implementation.
+- Schema changes require an Alembic migration; `alembic check` (and `tests/test_migrations.py`) must report no drift. The API never runs `create_all` unless `DB_AUTO_CREATE=true`.
+- Response models are Pydantic (`app/schemas/`). After changing them run `python -m scripts.export_openapi && (cd frontend && npm run gen:api)`; `tests/test_openapi_sync.py` fails otherwise.
+- Effort/length heuristics never add marks (see §9).
+- Similarity flags are evidence for review, worded neutrally ("Potential match — review required").
 
 ---
 
 ## 3. Repository layout
 
 ```
-gradeops project/
-├── app/                          # FastAPI backend
-│   ├── main.py                   # App entry, CORS, lifespan, DB init
-│   ├── config.py                 # pydantic-settings from .env
-│   ├── api/routes/
-│   │   ├── upload.py             # POST rubric, answer-sheet
-│   │   ├── evaluate.py           # POST run, batch, ocr-only
-│   │   └── results.py            # GET results, annotated PDF, report
-│   ├── core/                     # logging, exceptions
-│   ├── db/                       # models, session, crud
-│   ├── schemas/                  # Pydantic API models
-│   └── services/
-│       ├── pipeline.py           # Orchestrator
-│       ├── pdf_processor.py      # PDF → images
-│       ├── layout_segmenter.py   # Question regions
-│       ├── ocr/                  # Florence-2, Nougat, Tesseract
-│       ├── rubric_parser.py      # JSON/PDF → RubricSchema
-│       ├── text_utils.py         # OCR cleanup, Q detection, validation
-│       ├── answer_quality.py     # Handwritten-answer heuristics
-│       ├── evaluation_engine.py  # Scoring + justifications
-│       ├── plagiarism_detector.py
-│       └── pdf_annotator.py
-├── frontend/                     # Next.js 14 + Tailwind
-│   └── src/
-│       ├── app/                  # layout, page, globals
-│       ├── components/GradeOpsDashboard.tsx
-│       └── lib/api.ts            # API client
-├── samples/                      # Example JSON rubrics
-├── sample pdfs/                  # Real test PDFs (user-provided)
-├── scripts/
-│   ├── debug_quiz_rubric.py      # Verify Quiz2 PDF → 6 Q, 15 marks
-│   └── api_examples.ps1 / .sh
-├── tests/                        # pytest (text_utils, answer_quality, …)
-├── uploads/                      # Stored uploads (gitignored)
-├── outputs/                      # evaluation.json, annotated PDFs
-├── docker-compose.yml            # Postgres + API
-├── requirements.txt
-├── .env.example
-├── README.md
-└── PROJECT_STATUS.md             # This file
+app/
+├── main.py                 # app, CORS, lifespan (security checks, schema-revision check)
+├── config.py               # settings (.env)
+├── api/
+│   ├── deps_auth.py        # authentication + role dependencies
+│   ├── permissions.py      # ownership / assignment checks and SQL scopes
+│   └── routes/             # auth, courses, exams, rubrics, professor, ta, review,
+│                           # upload, bulk, evaluate, results, analytics
+├── db/                     # models.py (enums + tables), session.py, crud.py
+├── schemas/                # common (ApiModel), academic, review, dashboard, evaluation, …
+└── services/
+    ├── pipeline.py, pdf_processor.py, layout_segmenter.py, ocr/, rubric_parser.py,
+    │   text_utils.py, answer_quality.py, evaluation_engine.py, embeddings.py,
+    │   plagiarism_detector.py, pdf_annotator.py            # grading pipeline
+    ├── batch_queue.py, evaluate_all_queue.py               # background jobs
+    ├── review_service.py, review_queue.py                  # review lifecycle + queues
+    ├── exam_workflow.py, finalization.py                   # exam status, gradebook, publish
+    └── academic.py, staff.py, analytics_service.py, integrity.py, activity.py
+alembic/versions/           # 0001_baseline, 0002_academic_hierarchy
+scripts/                    # create_user, seed_dev, claim_legacy_data, export_openapi,
+                            # e2e_fixtures, debug_* rubric checks
+frontend/src/
+├── app/                    # /login, /signup, /professor/*, /ta/*, /workbench, /analytics
+├── components/             # ui, layout, grading, professor, ta, charts, workbench
+├── lib/                    # client, endpoints, types, api-schema (generated), session, roles
+└── test/                   # vitest setup + component tests
+frontend/e2e/workflow.cjs   # Playwright browser E2E
+tests/                      # pytest against PostgreSQL (see §12)
+docs/screenshots/           # README screenshots
 ```
 
 ---
 
-## 4. API contract (stable)
+## 4. API contract
 
-**Base URL:** `http://localhost:8000`  
-**Prefix:** `/api/v1`
+Full endpoint list: `README.md` → API, or `http://localhost:8000/docs`. The
+machine-readable contract is `frontend/src/lib/openapi.json`.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| POST | `/api/v1/upload/rubric` | Form: `file` (.json/.pdf), `name` |
-| POST | `/api/v1/upload/answer-sheet` | Form: `file` (.pdf), `student_id`, optional `rubric_id` |
-| POST | `/api/v1/evaluate/run` | JSON: `submission_id`, `rubric_id?`, `run_plagiarism_check` |
-| POST | `/api/v1/evaluate/batch` | Multiple submission IDs |
-| POST | `/api/v1/evaluate/ocr/{submission_id}` | OCR only |
-| GET | `/api/v1/results/{submission_id}` | Full result JSON |
-| GET | `/api/v1/results/{submission_id}/json` | Typed `EvaluationResponse` |
-| GET | `/api/v1/results/{submission_id}/annotated-pdf` | PDF download |
-| GET | `/api/v1/results/{submission_id}/generate-report` | OCR + logs + evaluation |
-
-**Evaluation response shape (frontend depends on this):**
+The legacy workbench routes keep their original request/response shapes. The
+per-question evaluation result gained optional fields (`criteria`,
+`key_points_partial`, `requires_manual_grading`, `ai_marks_awarded`,
+`scoring_method`, `reviewer_comment`); existing fields are unchanged.
 
 ```json
 {
-  "submission_id": "uuid",
-  "student_id": "string",
-  "results": [
-    {
-      "question": "Q1",
-      "marks_awarded": 1.5,
-      "max_marks": 2.0,
-      "justification": "...",
-      "confidence": 0.62,
-      "is_blank": false,
-      "key_points_matched": [],
-      "key_points_missed": []
-    }
-  ],
-  "total": 8.5,
-  "max_total": 15.0,
-  "plagiarism_flags": [],
-  "annotated_pdf_url": "/api/v1/results/{id}/annotated-pdf"
+  "question": "Q1",
+  "marks_awarded": 1.5,
+  "max_marks": 2.0,
+  "justification": "...",
+  "confidence": 0.62,
+  "is_blank": false,
+  "key_points_matched": [],
+  "key_points_partial": [],
+  "key_points_missed": [],
+  "criteria": [{ "criterion": "...", "kind": "key_point", "max_marks": 1, "awarded": 1, "status": "met" }],
+  "requires_manual_grading": false,
+  "scoring_method": "semantic"
 }
 ```
 
-**Important:** `max_total` is computed from the **validated rubric** (`rubric_total_marks`), not from summing duplicate OCR regions. `total` is the sum of `marks_awarded` per question (one row per rubric question).
+`max_total` comes from the validated rubric; `total` is the sum of per-question marks.
 
 ---
 
 ## 5. Database models
 
-| Table | Purpose |
-|-------|---------|
-| `rubrics` | Parsed rubric JSON (`structured_data`), source file metadata |
-| `student_submissions` | Answer PDF path, status, `extracted_text`, `evaluation_result`, `annotated_pdf_path` |
-| `extracted_answers` | Per-question OCR rows (bbox, text, confidence) |
-| `evaluation_logs` | Stage messages (ocr, evaluate, …) |
+See `README.md` → Database for the table list. Key points:
 
-**Submission status enum:** `uploaded` → `processing` → `ocr_complete` → `evaluated` (or `failed`).
-
----
+- `users.role`: `PROFESSOR` | `TA` (the old `INSTRUCTOR` value was renamed by migration 0002).
+- `courses.professor_id` owns a course; `course_members` (TAs) and `exam_tas` (TA ↔ exam, `active`) drive TA access.
+- `student_submissions` carries `course_id`, `exam_id`, `student_record_id`, `assigned_ta_id`, `review_status`, `ai_total_marks` / `ta_total_marks` / `professor_total_marks`, escalation fields, `min_confidence`, `needs_manual_grading`.
+- `review_audit` records every decision with actor, role, from/to status, per-question old/new marks and reason; `exam_audit` records exam-level events.
+- `integrity_flags` stores one row per (exam, question, submission pair) with evidence and the professor's resolution; re-running evaluation keeps resolved decisions.
+- Legacy rows (no course/exam) survive migration; `scripts/claim_legacy_data.py` attaches them to a professor's `LEGACY` course.
 
 ## 6. Completed fixes (historical context)
 
@@ -314,155 +282,70 @@ Expected: 6 questions, total 15.0 for `Quiz2_MA201-2025-Solutions.pdf`.
 
 ---
 
-## 9. Grading logic (detailed)
-
-**Entry:** `EvaluationEngine.evaluate_all()` → one `QuestionResult` per rubric question.
-
-### 9.1 Answer quality (`answer_quality.py`)
-
-`analyze_answer()` computes:
-
-- Length, words, digits, math symbols, equation-like lines, step hints, STEM tokens.
-- `keyword_best` vs rubric key points.
-- `content_score` (0–1), `is_handwritten_math`, `is_truly_blank`.
-
-`effort_based_marks(max_marks, quality)` — tiered partial credit (20–72% of max by content score), floor ~25% of max if math signals present.
-
-### 9.2 Rubric alignment (`evaluation_engine.py`)
-
-For each key point:
-
-- Embedding cosine similarity (sentence-transformers `all-MiniLM-L6-v2`).
-- Keyword overlap (lightweight, no extra models).
-- `combined = 0.55×sem + 0.45×kw`.
-
-Marks from matched (full) + partial (55% weight per point) key points, plus optional partial rules / negative conditions (penalties require higher bar to avoid OCR false positives).
-
-### 9.3 Final marks per question
-
-```text
-rubric_marks  = from key points + rules − penalties
-effort_marks  = from answer_quality heuristics
-marks_awarded = blend(max(rubric, effort×0.75), effort if rubric very low)
-              → round to 0.5, cap at max_marks, effort-alone cap 85% of max
-```
-
-Blanks: `content_score < 0.15` and OCR blank → 0 marks, high confidence.
-
-### 9.4 Confidence
-
-`realistic_confidence()` — typically 0.40–0.85 for non-blank handwritten answers; ~0.90 for confirmed blanks.
-
-### 9.5 Optional LLM
-
-If `USE_LLM_REASONING=true` and `OPENAI_API_KEY` set, justifications can be rewritten (marks unchanged). **Off by default** for demos and RAM.
-
-### 9.6 Plagiarism
-
-`PlagiarismDetector` — cross-student embedding similarity per question above `PLAGIARISM_SIMILARITY_THRESHOLD` (0.92).
 
 ---
 
-## 10. Frontend setup
+## 9. Grading logic (current)
 
-**Stack:** Next.js 14, React 18, TypeScript, Tailwind CSS.
+**Entry:** `EvaluationEngine.evaluate_all()` → one `QuestionResult` per rubric question.
 
-**Key files:**
+- Each key point is worth `max_marks / n`. A full match (semantic ≥ 0.55; or semantic ≥ 0.40 with keyword overlap ≥ 0.25; or keyword ≥ 0.60 with semantic ≥ 0.30) earns the full share; a partial match (semantic ≥ 0.40, or keyword ≥ 0.35 with semantic ≥ 0.30) earns half. Word overlap without semantic agreement is not credited.
+- Partial-credit rules are **floors** (`max(key_point_marks, rule_marks)`), not bonuses.
+- Partial-credit rules and negative conditions need a strong match (semantic ≥ 0.55 and keyword ≥ 0.35). Each triggered negative condition deducts 15% of the question, at most 40% in total.
+- `answer_quality.effort_based_marks` is computed only as evidence: if it exceeds the awarded marks by ≥ 25% of the maximum, the result gets confidence ≤ 0.45 and `requires_manual_grading`, which surfaces it in review queues. It never changes marks.
+- Questions without key points are returned with 0 marks and `requires_manual_grading`.
+- Embedding model unavailable → `EMBEDDING_FALLBACK=lexical` grades with keyword overlap only (`scoring_method: lexical`, confidence ≤ 0.5); `error` fails instead.
+- Optional LLM (`USE_LLM_REASONING`) may rewrite justifications; marks are unchanged.
+- Similarity check (`plagiarism_detector.py`): per question, pairwise cosine (or Jaccard when no model) ≥ `PLAGIARISM_SIMILARITY_THRESHOLD` (0.92). Pairs where both answers are ≥ 0.75 similar to the rubric's key points are skipped. Flags are persisted as `integrity_flags` for professor review.
+- `tests/test_evaluation_correctness.py` pins these rules (a long, effortful but irrelevant answer scores 0; matching criteria earn their share; partial rules are floors; no key points → manual grading; lexical fallback is marked and capped; neutral flag wording; answers that both follow the rubric are not flagged).
 
-- `frontend/src/components/GradeOpsDashboard.tsx` — full UI (do not redesign without user request).
-- `frontend/src/lib/api.ts` — fetch wrappers matching API above.
-- `frontend/.env.local` — `NEXT_PUBLIC_API_URL=http://localhost:8000`
+---
 
-**Flow:**
+## 10. Frontend
 
-1. Upload rubric → stores `rubricId` in state + localStorage.
-2. Upload answer sheet(s) with `student_id`.
-3. **Evaluate** → POST `/evaluate/run`.
-4. Expand **Question breakdown**; download **Annotated PDF**.
+**Stack:** Next.js 14 app router (client pages), React 18, TypeScript, Tailwind with CSS-variable tokens (light/dark, `darkMode: "class"`), Vitest + Testing Library, Playwright for E2E.
 
-**Note:** After backend rubric parser fixes, users must **re-upload rubric** (or clear session) — old DB rubrics may still hold the 4-question / 10-mark parse.
+- `lib/session.tsx` — `SessionProvider` resolves the user from `GET /auth/me`; `lib/roles.ts` maps role → home and validates `?next=` paths.
+- `components/layout/RoleGuard.tsx` — wrong role shows *Access denied* then redirects home (the API enforces the same rule).
+- `components/grading/ReviewWorkspace.tsx` — shared review screen (TA and professor), keyboard shortcuts via `lib/shortcuts.ts`, auto-advance to the next pending submission.
+- `components/GradeOpsDashboard.tsx` — the original workbench, now composed from `components/workbench/*`.
+- Charts are plain HTML/CSS (`components/charts/Charts.tsx`) using `--viz-*` tokens; every chart has a table view.
+- Types come from `lib/api-schema.ts` (generated); `lib/types.ts` re-exports friendly aliases.
 
 ---
 
 ## 11. Backend setup
 
-**Stack:** Python 3.11+, FastAPI, SQLAlchemy 2 async, PostgreSQL, PyMuPDF, OpenCV, sentence-transformers, transformers (optional OCR models).
-
-**Config:** `.env` from `.env.example`
-
-| Variable | Typical value | Notes |
-|----------|---------------|--------|
-| `DATABASE_URL` | `postgresql+asyncpg://gradeops:gradeops@localhost:5432/gradeops` | |
-| `OCR_ENGINE` | `tesseract` (dev) / `florence2` (GPU) | |
-| `OCR_DEVICE` | `cpu` | |
-| `EMBEDDING_MODEL_ID` | `sentence-transformers/all-MiniLM-L6-v2` | Loaded once, cached |
-| `SIMILARITY_THRESHOLD` | `0.55` (config); engine uses lower internal thresholds | |
-| `BLANK_ANSWER_MIN_CHARS` | `3` | |
-| `MAX_UPLOAD_MB` | `50` | |
+Python 3.11+, FastAPI, SQLAlchemy 2 async, PostgreSQL, Alembic, PyMuPDF, OpenCV, Tesseract, sentence-transformers / transformers (optional OCR models). All settings: `.env.example` and `README.md` → Configuration reference.
 
 ---
 
-## 12. Commands to run
+## 12. Commands
 
-### 12.1 PostgreSQL (local)
+```bash
+# Database
+alembic upgrade head
+python -m scripts.create_user --email prof@uni.edu --role professor
+python -m scripts.seed_dev --with-reviews          # development data only
 
-Create DB/user if needed:
+# Run
+uvicorn app.main:app --reload --port 8000
+cd frontend && npm run dev
 
-```sql
-CREATE USER gradeops WITH PASSWORD 'gradeops';
-CREATE DATABASE gradeops OWNER gradeops;
-```
+# Backend tests (needs a gradeops_test database; TEST_DATABASE_URL to override)
+pytest tests/ -q
 
-### 12.2 Backend
+# Frontend checks
+cd frontend && npm test && npm run typecheck && npm run lint && npm run build
 
-```powershell
-cd "d:\gradeops project"
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env
-# Install Tesseract for OCR fallback: https://github.com/UB-Mannheim/tesseract/wiki
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+# Browser E2E (API + web running)
+python -m scripts.e2e_fixtures /tmp/gradeops-e2e
+cd frontend && E2E_FILES=/tmp/gradeops-e2e npm run e2e
 
-- API docs: http://localhost:8000/docs  
-- Health: http://localhost:8000/health  
+# Contract sync after schema changes
+python -m scripts.export_openapi && (cd frontend && npm run gen:api)
 
-### 12.3 Frontend
-
-```powershell
-cd "d:\gradeops project\frontend"
-copy .env.local.example .env.local
-npm install
-npm run dev
-```
-
-- UI: http://localhost:3000  
-
-### 12.4 Docker (backend + Postgres only)
-
-```powershell
-cd "d:\gradeops project"
-copy .env.example .env
-docker compose up --build
-```
-
-Run frontend separately on host.
-
-### 12.5 Tests
-
-```powershell
-cd "d:\gradeops project"
-$env:PYTHONPATH="."
-python -m pytest tests/test_text_utils.py tests/test_answer_quality.py -v
-```
-
-Full suite may require all deps (`PyMuPDF`, `PIL`, `sentence-transformers`, etc.).
-
-### 12.6 Debug rubric parse
-
-```powershell
-$env:PYTHONPATH="."
+# Rubric parser checks
 python -m scripts.debug_quiz_rubric
 ```
 
@@ -470,106 +353,71 @@ python -m scripts.debug_quiz_rubric
 
 ## 13. Known limitations
 
-1. **Handwritten answer PDFs** (`DATA.pdf`): No embedded text; OCR quality dominates. Segmentation uses rubric-guided strips — misalignment on multi-page layouts can assign wrong text to a question.
-
-2. **Semantic grading is approximate:** Embeddings compare noisy OCR to typed rubric/solution phrases. Heuristic partial credit improves demos but is **not** a substitute for expert marking.
-
-3. **Rubric from solutions PDF:** Key points are inferred from stems/marking notes, not a formal instructor rubric. JSON rubrics (`samples/quiz2_ma201_rubric.json`) are more predictable.
-
-4. **RAM / CPU:** Florence-2 and sentence-transformers are heavy; use `OCR_ENGINE=tesseract` on low-RAM laptops. First evaluation loads embedding model (slow once).
-
-5. **LayoutParser:** Optional; disabled on rubric-guided path. Detectron2 not required for default flow.
-
-6. **No auth / multi-tenant:** Single-user demo; no role-based access despite original spec mentioning instructors/TAs.
-
-7. **Annotated PDF:** Marks placed using bbox heuristics; may not align perfectly with handwritten regions.
-
-8. **Re-upload required:** Cached rubrics in PostgreSQL are not auto-migrated when parser logic changes.
-
-9. **Python 3.14:** Some environments may have partial package compatibility; **3.11** is the tested target per README.
-
-10. **Plagiarism:** Only meaningful with multiple students evaluated together in batch with flag enabled.
+1. **OCR quality dominates** on handwritten PDFs (`DATA.pdf`); Tesseract is weak on cursive. Segmentation relies on visible question labels / rubric-guided strips.
+2. **Semantic grading is approximate** — every AI grade is provisional and must be approved by a human before publishing.
+3. **Background jobs are in-process** (`batch_queue.py`). A job interrupted by an API restart is marked failed after 20 minutes without progress (on the next exam/job read) and must be re-run. Legacy `evaluate/all` progress is in memory only.
+4. **Single owner per course** — no co-professors or department admins.
+5. **Student records are global** (`students.student_id` unique across courses).
+6. **Per-exam gradebook only** — no course-wide weighted grade matrix.
+7. **No student portal** — "published" means final and exportable.
+8. **Annotated PDF** mark placement uses bbox heuristics.
+9. **Offline hosts** without the embedding model grade lexically with capped confidence.
 
 ---
 
-## 14. Next improvement ideas (prioritized)
+## 14. Next improvement ideas
 
-### High impact
-
-1. **Per-question OCR crops from layout** — detect handwritten boxes on `DATA.pdf` instead of only equal vertical splits (OpenCV contour + rubric anchors).
-
-2. **Ship canonical JSON rubrics** per exam in `samples/` and recommend JSON upload in UI helper text.
-
-3. **Golden-file tests** — store expected parse of `Quiz2_MA201-2025-Solutions.pdf` and expected score ranges for `DATA.pdf` snippets in CI.
-
-4. **Cache embedding model** in `models_cache/` with explicit warm-up endpoint `POST /evaluate/warmup` for demos.
-
-### Medium impact
-
-5. **Question–answer alignment** using detected “Q1”, “Q2” marks in handwritten margins (OCR on left margin).
-
-6. **Tune effort/rubric blend** per question mark weight (small questions vs 4-mark questions).
-
-7. **Alembic migrations** instead of `create_all` only.
-
-8. **List submissions API** — `GET /api/v1/submissions` for dashboard refresh without localStorage.
-
-9. **Progress WebSocket** for long OCR/evaluate jobs.
-
-### Lower priority / future phases
-
-10. Instructor vs TA roles, review queue, keyboard shortcuts (original product spec).
-
-11. Optional LLM justification (`USE_LLM_REASONING`) with budget caps.
-
-12. Fine-tuned OCR for math (Nougat/TrOCR) when GPU available.
-
-13. Next.js production deploy + API URL env per environment.
-
-14. Upgrade Next.js past 14.2.18 (security advisory in npm audit).
+1. External job queue (e.g. Redis/RQ or Postgres-backed worker) so evaluation survives API restarts.
+2. Course-wide gradebook with exam weights.
+3. Co-professor / course admin roles.
+4. Per-question OCR crops from detected handwriting boxes.
+5. Golden-file tests for OCR + scoring on the sample PDFs.
+6. Upgrade Next.js beyond 14.2.x.
 
 ---
 
-## 15. Files to read first (for AI continuation)
+## 15. Files to read first
 
 | Priority | File | Why |
 |----------|------|-----|
-| 1 | `app/services/pipeline.py` | End-to-end flow |
-| 2 | `app/services/evaluation_engine.py` | Scoring behavior |
-| 3 | `app/services/answer_quality.py` | Handwritten heuristics |
-| 4 | `app/services/text_utils.py` | Rubric parse + OCR cleanup |
-| 5 | `app/services/rubric_parser.py` | PDF/JSON rubric ingest |
-| 6 | `app/services/ocr/ocr_service.py` | OCR chain |
-| 7 | `frontend/src/components/GradeOpsDashboard.tsx` | UI contract |
-| 8 | `app/api/routes/*.py` | HTTP surface |
+| 1 | `app/api/permissions.py`, `app/api/deps_auth.py` | Who can see / do what |
+| 2 | `app/services/review_service.py` | Review state machine |
+| 3 | `app/services/finalization.py` | Approve / lock / publish / reopen, gradebook |
+| 4 | `app/db/models.py`, `alembic/versions/0002_academic_hierarchy.py` | Data model + legacy mapping |
+| 5 | `app/services/pipeline.py`, `app/services/evaluation_engine.py` | Grading |
+| 6 | `frontend/src/components/grading/ReviewWorkspace.tsx` | Review UI |
+| 7 | `frontend/src/lib/session.tsx`, `frontend/src/lib/roles.ts` | Login routing |
 
 ---
 
 ## 16. Demo checklist
 
-1. Start Postgres → backend → frontend.  
-2. Upload **`samples/quiz2_ma201_rubric.json`** OR **`sample pdfs/Quiz2_MA201-2025-Solutions.pdf`** (verify 6 questions, 15 marks in logs).  
-3. Upload **`sample pdfs/DATA.pdf`** with a student ID.  
-4. **Evaluate** — expect non-zero partial marks if OCR extracted content per question.  
-5. Download annotated PDF; expand question breakdown for justifications.  
-6. If totals wrong: **Clear list**, re-upload rubric, re-evaluate.
+1. `alembic upgrade head` → `python -m scripts.seed_dev --with-reviews`.
+2. Start API (`OCR_ENGINE=tesseract` is fine) and web.
+3. Sign in as `professor@gradeops.dev` (password printed by the seed script): overview → course → exam command center → analytics → integrity.
+4. Sign in as `rahul.ta@gradeops.dev`: review queue → review screen → `A` / `O` / `E` → history.
+5. Back as professor: resolve the escalation → Finalize (approve → publish) → final CSV.
 
 ---
 
-## 17. Changelog snapshot (conversation-derived)
+## 17. Changelog snapshot
 
 | Area | Status |
 |------|--------|
-| FastAPI + PostgreSQL | Working |
+| FastAPI + PostgreSQL | Working; schema via Alembic (0001 baseline, 0002 hierarchy) |
 | OCR pipeline | Working (engine-dependent quality) |
-| Rubric parse (typed PDF) | Working — 6×15 for Quiz 2 |
-| Rubric parse (OCR-only) | Fragile |
-| Handwritten evaluation | Improved via heuristics; not perfect |
-| Frontend dashboard | Working |
-| Docker compose | Working (API + DB) |
-| Auth / HITL review UI | Not implemented |
-| Phase 2 features | Not started |
+| Rubric parse (typed PDF / JSON) | Working |
+| Evaluation engine | Rubric-evidence scoring; effort never adds marks; lexical fallback |
+| Similarity check | Persisted integrity flags with professor resolution; reference-following pairs skipped |
+| Auth & roles | JWT; Professor / TA; backend ownership + assignment checks; TA-only self-registration |
+| Courses, roster, TAs, exams | Implemented (API + Professor dashboard) |
+| TA review workflow | Queue, split-screen review, override/escalate, shortcuts, history |
+| Finalisation | Approve / lock / publish / reopen with audit; gradebook + CSV |
+| Analytics | Course, exam, question, student, reviewer-agreement |
+| Legacy workbench | Preserved (`/workbench`; anonymous with `AUTH_ENABLED=false`) |
+| Tests | pytest (API, authorization, lifecycle, migrations, engine), vitest, Playwright E2E |
+| Docker compose | API + Postgres + one-shot migrate service |
 
 ---
 
-*End of PROJECT_STATUS.md — update this file when making significant behavioral or architectural changes.*
+*Update this file when making significant behavioral or architectural changes.*

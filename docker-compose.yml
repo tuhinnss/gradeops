@@ -15,12 +15,26 @@ services:
       timeout: 5s
       retries: 5
 
+  # One-shot schema migration. The API does not create tables on startup.
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gradeops:gradeops@db:5432/gradeops
+    depends_on:
+      db:
+        condition: service_healthy
+
   api:
     build: .
     ports:
       - "8000:8000"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://gradeops:gradeops@db:5432/gradeops
       OCR_ENGINE: tesseract
@@ -32,6 +46,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:
