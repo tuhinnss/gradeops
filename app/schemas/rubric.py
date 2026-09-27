@@ -1,14 +1,16 @@
 """Rubric Pydantic schemas."""
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from app.schemas.common import ApiModel
 
 
-class PartialCreditRule(BaseModel):
+class PartialCreditRule(ApiModel):
     condition: str
     marks: float
 
 
-class RubricItem(BaseModel):
+class RubricItem(ApiModel):
     question_number: str
     max_marks: float
     key_points: list[str] = Field(default_factory=list)
@@ -16,7 +18,7 @@ class RubricItem(BaseModel):
     partial_credit_rules: list[PartialCreditRule] = Field(default_factory=list)
 
 
-class RubricSchema(BaseModel):
+class RubricSchema(ApiModel):
     title: str = "Exam Rubric"
     items: list[RubricItem]
 

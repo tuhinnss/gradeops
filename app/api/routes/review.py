@@ -1,56 +1,76 @@
-"""Human-in-the-loop review workflow."""
+"""Human-in-the-loop review: state, detail, actions and answer-sheet images.
+
+``POST /review/{id}/action`` is the single implementation of review decisions for
+TAs and professors (see ``app.services.review_service``).
+"""
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+import fitz
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps_auth import get_current_user_optional
+from app.api.deps_auth import get_legacy_actor
+from app.api.permissions import require_submission_access
+from app.config import get_settings
 from app.db import crud
-from app.db.models import ReviewStatus, User
+from app.db.models import StudentSubmission, User
 from app.db.session import get_db
 from app.schemas.evaluation import QuestionResult
-from app.schemas.review import ReviewActionRequest, ReviewAuditItem, SubmissionReviewResponse
+from app.schemas.review import ReviewActionRequest, ReviewDetailResponse, SubmissionReviewResponse
+from app.services.review_queue import audit_items, review_detail
+from app.services.review_service import apply_review_action
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+CROP_MARGIN_PT = 6
+IMAGE_CACHE = {"Cache-Control": "private, max-age=300"}
 
-@router.get("/{submission_id}", response_model=SubmissionReviewResponse)
-async def get_review_state(
-    submission_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-) -> SubmissionReviewResponse:
-    submission = await crud.get_submission(db, submission_id)
-    if not submission or not submission.evaluation_result:
-        raise HTTPException(status_code=404, detail="Submission not evaluated yet")
 
-    data = submission.evaluation_result
-    audits = await crud.list_review_audits(db, submission_id)
-
+async def _review_state(db: AsyncSession, submission: StudentSubmission) -> SubmissionReviewResponse:
+    data = submission.evaluation_result or {}
     return SubmissionReviewResponse(
-        submission_id=submission_id,
+        submission_id=submission.id,
         student_id=submission.student_id,
         review_status=submission.review_status,
         reviewer_notes=submission.reviewer_notes,
         results=[QuestionResult.model_validate(r) for r in data.get("results", [])],
         total=float(data.get("total", 0)),
         max_total=float(data.get("max_total", 0)),
-        audit_history=[
-            ReviewAuditItem(
-                id=a.id,
-                action=a.action,
-                question=a.question,
-                old_marks=a.old_marks,
-                new_marks=a.new_marks,
-                notes=a.notes,
-                created_at=a.created_at.isoformat() if a.created_at else None,
-            )
-            for a in audits
-        ],
+        audit_history=await audit_items(db, submission.id),
+        exam_id=submission.exam_id,
+        ai_total=submission.ai_total_marks,
+        ta_total=submission.ta_total_marks,
+        professor_total=submission.professor_total_marks,
+        escalation_reason=submission.escalation_reason,
+        escalation_notes=submission.escalation_notes,
     )
+
+
+@router.get("/{submission_id}", response_model=SubmissionReviewResponse)
+async def get_review_state(
+    submission_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
+) -> SubmissionReviewResponse:
+    submission = await require_submission_access(db, submission_id, user)
+    if not submission.evaluation_result:
+        raise HTTPException(status_code=404, detail="Submission not evaluated yet")
+    return await _review_state(db, submission)
+
+
+@router.get("/{submission_id}/detail", response_model=ReviewDetailResponse)
+async def get_review_detail(
+    submission_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
+) -> ReviewDetailResponse:
+    submission = await require_submission_access(db, submission_id, user)
+    return await review_detail(db, submission, user)
 
 
 @router.post("/{submission_id}/action", response_model=SubmissionReviewResponse)
@@ -58,74 +78,91 @@ async def review_action(
     submission_id: uuid.UUID,
     body: ReviewActionRequest,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user_optional),
+    user: User | None = Depends(get_legacy_actor),
 ) -> SubmissionReviewResponse:
-    submission = await crud.get_submission(db, submission_id)
-    if not submission or not submission.evaluation_result:
-        raise HTTPException(status_code=404, detail="Submission not evaluated yet")
+    # Row lock serialises concurrent decisions on the same submission.
+    submission = await require_submission_access(db, submission_id, user, lock=True)
+    await apply_review_action(db, submission, user, body)
+    return await _review_state(db, submission)
 
-    eval_data = dict(submission.evaluation_result)
-    results = list(eval_data.get("results", []))
-    action = body.action.lower()
 
-    if action == "override" and body.overrides:
-        for ov in body.overrides:
-            for r in results:
-                if r.get("question") == ov.question:
-                    old_marks = float(r.get("marks_awarded", 0))
-                    r["marks_awarded"] = ov.marks_awarded
-                    if ov.justification:
-                        r["justification"] = ov.justification
-                    await crud.add_review_audit(
-                        db,
-                        submission_id=submission_id,
-                        reviewer_id=user.id if user else None,
-                        action="override",
-                        question=ov.question,
-                        old_marks=old_marks,
-                        new_marks=ov.marks_awarded,
-                        notes=body.notes,
-                    )
-        eval_data["results"] = results
-        eval_data["total"] = sum(float(r.get("marks_awarded", 0)) for r in results)
-        review_status = ReviewStatus.OVERRIDDEN
-    elif action == "approve":
-        review_status = ReviewStatus.APPROVED
-        await crud.add_review_audit(
-            db,
-            submission_id=submission_id,
-            reviewer_id=user.id if user else None,
-            action="approve",
-            notes=body.notes,
-        )
-    elif action == "reject":
-        review_status = ReviewStatus.REJECTED
-        await crud.add_review_audit(
-            db,
-            submission_id=submission_id,
-            reviewer_id=user.id if user else None,
-            action="reject",
-            notes=body.notes,
-        )
-    else:
-        review_status = ReviewStatus.REVIEWED
-        await crud.add_review_audit(
-            db,
-            submission_id=submission_id,
-            reviewer_id=user.id if user else None,
-            action=action,
-            notes=body.notes,
-        )
+# --- Answer-sheet images ----------------------------------------------------------------
 
-    await crud.update_submission(
-        db,
-        submission,
-        evaluation_result=eval_data,
-        total_marks=eval_data.get("total"),
-        review_status=review_status,
-        reviewer_notes=body.notes,
-        reviewed_by=user.id if user else None,
-        reviewed_at=datetime.now(UTC),
+
+def _open_pdf(submission: StudentSubmission) -> fitz.Document:
+    path = Path(submission.file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Answer sheet file missing on disk")
+    return fitz.open(path)
+
+
+def _render(page: fitz.Page, zoom: float, clip: fitz.Rect | None = None) -> bytes:
+    return page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False).tobytes("png")
+
+
+@router.get("/{submission_id}/pages/{page_index}")
+async def get_page_image(
+    submission_id: uuid.UUID,
+    page_index: int,
+    dpi: int = Query(110, ge=50, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
+) -> Response:
+    submission = await require_submission_access(db, submission_id, user)
+    with _open_pdf(submission) as doc:
+        if page_index < 0 or page_index >= len(doc):
+            raise HTTPException(status_code=404, detail="Page not found")
+        png = _render(doc[page_index], dpi / 72.0)
+    return Response(content=png, media_type="image/png", headers=IMAGE_CACHE)
+
+
+@router.get("/{submission_id}/answer-image")
+async def get_answer_image(
+    submission_id: uuid.UUID,
+    question: str = Query(..., min_length=1, max_length=32),
+    dpi: int = Query(130, ge=50, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
+) -> Response:
+    """Crop of the answer region OCR used for ``question`` (full page if unknown)."""
+    submission = await require_submission_access(db, submission_id, user)
+    answer = next(
+        (a for a in await crud.list_extracted_answers(db, submission_id) if a.question_number.upper() == question.upper()),
+        None,
+    )
+    page_index = answer.page_index if answer else 0
+    source_zoom = get_settings().pdf_dpi / 72.0  # OCR bboxes are in pixels at PDF_DPI
+    with _open_pdf(submission) as doc:
+        if page_index >= len(doc):
+            raise HTTPException(status_code=404, detail="Page not found")
+        page = doc[page_index]
+        clip = None
+        if answer and isinstance(answer.bbox, dict) and {"x0", "y0", "x1", "y1"} <= answer.bbox.keys():
+            b = answer.bbox
+            clip = fitz.Rect(
+                b["x0"] / source_zoom - CROP_MARGIN_PT,
+                b["y0"] / source_zoom - CROP_MARGIN_PT,
+                b["x1"] / source_zoom + CROP_MARGIN_PT,
+                b["y1"] / source_zoom + CROP_MARGIN_PT,
+            ) & page.rect
+            if clip.is_empty:
+                clip = None
+        png = _render(page, dpi / 72.0, clip)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={**IMAGE_CACHE, "X-Page-Index": str(page_index), "X-Cropped": "1" if clip else "0"},
     )
 
-    return await get_review_state(submission_id, db)
+
+@router.get("/{submission_id}/source-pdf")
+async def get_source_pdf(
+    submission_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
+) -> FileResponse:
+    submission = await require_submission_access(db, submission_id, user)
+    path = Path(submission.file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Answer sheet file missing on disk")
+    return FileResponse(path, media_type="application/pdf", filename=submission.source_filename)

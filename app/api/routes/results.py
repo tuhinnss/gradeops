@@ -7,8 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps_auth import get_legacy_actor
+from app.api.permissions import require_submission_access
 from app.config import get_settings
 from app.db import crud
+from app.db.models import User
 from app.db.session import get_db
 from app.schemas.evaluation import EvaluationResponse, QuestionResult
 
@@ -20,8 +23,9 @@ settings = get_settings()
 async def get_results(
     submission_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
 ) -> dict:
-    submission = await crud.get_submission(db, submission_id)
+    submission = await require_submission_access(db, submission_id, user)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -49,8 +53,9 @@ async def get_results(
 async def get_results_json(
     submission_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
 ) -> EvaluationResponse:
-    submission = await crud.get_submission(db, submission_id)
+    submission = await require_submission_access(db, submission_id, user)
     if not submission or not submission.evaluation_result:
         raise HTTPException(status_code=404, detail="Evaluation results not found")
 
@@ -69,8 +74,9 @@ async def get_results_json(
 async def download_annotated_pdf(
     submission_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
 ) -> FileResponse:
-    submission = await crud.get_submission(db, submission_id)
+    submission = await require_submission_access(db, submission_id, user)
     if not submission or not submission.annotated_pdf_path:
         raise HTTPException(status_code=404, detail="Annotated PDF not found")
 
@@ -89,9 +95,10 @@ async def download_annotated_pdf(
 async def generate_report(
     submission_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
 ) -> JSONResponse:
     """Return full evaluation report including OCR extraction and logs."""
-    submission = await crud.get_submission(db, submission_id)
+    submission = await require_submission_access(db, submission_id, user)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -102,7 +109,7 @@ async def generate_report(
             "metadata": log.metadata_,
             "created_at": log.created_at.isoformat() if log.created_at else None,
         }
-        for log in submission.evaluation_logs
+        for log in await crud.list_evaluation_logs(db, submission_id)
     ]
 
     report = {

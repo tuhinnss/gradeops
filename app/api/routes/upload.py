@@ -7,9 +7,12 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps_auth import ensure_professor, get_legacy_actor
+from app.api.permissions import require_rubric_access
 from app.config import get_settings
 from app.core.exceptions import RubricParseError, http_error
 from app.db import crud
+from app.db.models import User
 from app.db.session import get_db
 from app.schemas.upload import RubricUploadResponse, UploadResponse
 from app.services.rubric_parser import RubricParser
@@ -63,8 +66,12 @@ async def upload_answer_sheet(
     student_id: str = Form(..., description="Student identifier"),
     rubric_id: uuid.UUID | None = Form(None),
     db: AsyncSession = Depends(get_db),
+    actor: User | None = Depends(get_legacy_actor),
 ) -> UploadResponse:
+    ensure_professor(actor)
     _validate_pdf(file)
+    if rubric_id:
+        await require_rubric_access(db, rubric_id, actor)
     dest_path, filename = await _save_upload(file, "submissions")
 
     submission = await crud.create_submission(
@@ -73,6 +80,7 @@ async def upload_answer_sheet(
         source_filename=filename,
         file_path=str(dest_path),
         rubric_id=rubric_id,
+        uploaded_by=actor.id if actor else None,
     )
     logger.info("Uploaded answer sheet for student %s: %s", student_id, submission.id)
 
@@ -88,7 +96,9 @@ async def upload_rubric(
     file: UploadFile = File(..., description="Marking scheme JSON or PDF"),
     name: str = Form("Exam Rubric"),
     db: AsyncSession = Depends(get_db),
+    actor: User | None = Depends(get_legacy_actor),
 ) -> RubricUploadResponse:
+    ensure_professor(actor)
     source_type = _validate_rubric_file(file)
     dest_path, filename = await _save_upload(file, "rubrics")
 
@@ -105,6 +115,7 @@ async def upload_rubric(
         source_type=source_type,
         structured_data=schema.to_dict(),
         file_path=str(dest_path),
+        owner_id=actor.id if actor else None,
     )
 
     return RubricUploadResponse(

@@ -1,7 +1,7 @@
 from app.schemas.evaluation import (
     EvaluationResponse,
-    QuestionResult,
     PlagiarismFlag,
+    QuestionResult,
 )
 from app.schemas.rubric import PartialCreditRule, RubricItem, RubricSchema
 from app.schemas.upload import UploadResponse

@@ -7,16 +7,21 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps_auth import get_current_user_optional
+from app.api.deps_auth import ensure_professor, get_legacy_actor
+from app.api.permissions import (
+    require_batch_job_access,
+    require_rubric_access,
+    require_submission_access,
+)
 from app.config import get_settings
 from app.db import crud
-from app.db.models import User
+from app.db.models import FROZEN_EXAM_STATUSES, Exam, User
 from app.db.session import async_session_factory, get_db
 from app.schemas.batch import BatchJobCreate, BatchJobResponse, BulkUploadResponse, BulkUploadItem
-from app.services.batch_queue import enqueue_batch_job
+from app.services.batch_queue import enqueue_batch_job, recover_interrupted_job
 from app.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
@@ -46,10 +51,15 @@ async def bulk_upload_answer_sheets(
     rubric_id: uuid.UUID | None = Form(None),
     batch_job_id: uuid.UUID | None = Form(None),
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user_optional),
+    user: User | None = Depends(get_legacy_actor),
 ) -> BulkUploadResponse:
+    ensure_professor(user)
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
+    if rubric_id:
+        await require_rubric_access(db, rubric_id, user)
+    if batch_job_id:
+        await require_batch_job_access(db, batch_job_id, user)
 
     uploaded: list[BulkUploadItem] = []
     failed: list[dict] = []
@@ -69,6 +79,7 @@ async def bulk_upload_answer_sheets(
                 file_path=str(dest),
                 rubric_id=rubric_id,
                 batch_job_id=batch_job_id,
+                uploaded_by=user.id if user else None,
             )
             uploaded.append(BulkUploadItem(id=sub.id, student_id=student_id, filename=file.filename))
         except Exception as exc:
@@ -86,9 +97,13 @@ async def bulk_upload_zip(
     file: UploadFile = File(..., description="ZIP containing PDF answer sheets"),
     rubric_id: uuid.UUID | None = Form(None),
     db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
 ) -> BulkUploadResponse:
+    ensure_professor(user)
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Only ZIP files accepted")
+    if rubric_id:
+        await require_rubric_access(db, rubric_id, user)
 
     content = await file.read()
     if len(content) > settings.max_upload_bytes:
@@ -105,6 +120,9 @@ async def bulk_upload_zip(
                     continue
                 idx += 1
                 try:
+                    # Bound the decompressed size before reading (zip-bomb guard).
+                    if zf.getinfo(name).file_size > settings.max_upload_bytes:
+                        raise ValueError(f"{name} exceeds size limit when extracted")
                     pdf_bytes = zf.read(name)
                     basename = Path(name).name
                     dest = await _save_pdf_bytes(pdf_bytes, basename, "submissions")
@@ -115,6 +133,7 @@ async def bulk_upload_zip(
                         source_filename=basename,
                         file_path=str(dest),
                         rubric_id=rubric_id,
+                        uploaded_by=user.id if user else None,
                     )
                     uploaded.append(
                         BulkUploadItem(id=sub.id, student_id=student_id, filename=basename)
@@ -135,11 +154,21 @@ async def bulk_upload_zip(
 async def create_batch_job(
     body: BatchJobCreate,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user_optional),
+    user: User | None = Depends(get_legacy_actor),
 ) -> BatchJobResponse:
-    rubric = await crud.get_rubric(db, body.rubric_id)
-    if not rubric:
-        raise HTTPException(status_code=404, detail="Rubric not found")
+    ensure_professor(user)
+    await require_rubric_access(db, body.rubric_id, user)
+    submissions = [
+        await require_submission_access(db, sid, user, manage=True) for sid in body.submission_ids
+    ]
+    for sub in submissions:
+        if not sub.exam_id:
+            continue
+        exam = await db.get(Exam, sub.exam_id)
+        if exam and exam.status in FROZEN_EXAM_STATUSES:
+            raise HTTPException(status_code=409, detail="Exam grades are locked; reopen the exam first")
+        if exam and exam.rubric_id and exam.rubric_id != body.rubric_id:
+            raise HTTPException(status_code=400, detail="Submission belongs to an exam with a different rubric")
 
     job = await crud.create_batch_job(
         db,
@@ -149,31 +178,34 @@ async def create_batch_job(
         created_by=user.id if user else None,
     )
 
-    for sid in body.submission_ids:
-        sub = await crud.get_submission(db, sid)
-        if sub:
-            await crud.update_submission(db, sub, batch_job_id=job.id, rubric_id=body.rubric_id)
+    for sub in submissions:
+        await crud.update_submission(db, sub, batch_job_id=job.id, rubric_id=body.rubric_id)
 
-    await db.flush()
+    # Commit before enqueueing so the background task can see the job.
+    await db.commit()
     enqueue_batch_job(job.id, async_session_factory)
 
-    return _job_response(job)
+    return job_response(job)
 
 
 @router.get("/jobs/{job_id}", response_model=BatchJobResponse)
-async def get_batch_job(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> BatchJobResponse:
-    job = await crud.get_batch_job(db, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Batch job not found")
-    return _job_response(job)
+async def get_batch_job(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_legacy_actor),
+) -> BatchJobResponse:
+    job = await require_batch_job_access(db, job_id, user)
+    await recover_interrupted_job(db, job)
+    return job_response(job)
 
 
-def _job_response(job) -> BatchJobResponse:
+def job_response(job) -> BatchJobResponse:
     total = job.total_count or 1
     pct = round(100.0 * (job.completed_count + job.failed_count) / total, 1)
     return BatchJobResponse(
         id=job.id,
         rubric_id=job.rubric_id,
+        exam_id=job.exam_id,
         status=job.status,
         total_count=job.total_count,
         completed_count=job.completed_count,
