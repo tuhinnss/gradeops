@@ -1,0 +1,49 @@
+{
+  "title": "CS3001 Data Structures — Mid Semester Examination",
+  "items": [
+    {
+      "question_number": "Q1",
+      "max_marks": 5,
+      "key_points": [
+        "A stack is a last in first out LIFO structure",
+        "Push and pop operations run in constant time",
+        "Stack overflow occurs when pushing onto a full array stack"
+      ],
+      "negative_conditions": ["Describes a stack as first in first out FIFO"],
+      "partial_credit_rules": [{ "condition": "Names push and pop without explaining order", "marks": 2 }]
+    },
+    {
+      "question_number": "Q2",
+      "max_marks": 5,
+      "key_points": [
+        "Binary search tree left subtree keys are smaller than the node key",
+        "Inorder traversal of a binary search tree gives sorted order",
+        "Search takes logarithmic time when the tree is balanced"
+      ],
+      "negative_conditions": [],
+      "partial_credit_rules": []
+    },
+    {
+      "question_number": "Q3",
+      "max_marks": 5,
+      "key_points": [
+        "Hash collisions happen when two keys map to the same bucket",
+        "Separate chaining stores colliding keys in a linked list",
+        "Open addressing probes for the next free slot"
+      ],
+      "negative_conditions": [],
+      "partial_credit_rules": [{ "condition": "Mentions collisions but no resolution strategy", "marks": 1 }]
+    },
+    {
+      "question_number": "Q4",
+      "max_marks": 5,
+      "key_points": [
+        "Breadth first search uses a queue and visits level by level",
+        "Depth first search uses a stack or recursion",
+        "Both traversals run in linear time in vertices plus edges"
+      ],
+      "negative_conditions": [],
+      "partial_credit_rules": []
+    }
+  ]
+}
