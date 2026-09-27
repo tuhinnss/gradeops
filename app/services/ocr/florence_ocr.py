@@ -2,9 +2,7 @@
 
 import logging
 
-import torch
 from PIL import Image
-from transformers import AutoModelForCausalLM, AutoProcessor
 
 from app.config import get_settings
 from app.services.ocr.base import BaseOCR, OCRResult
@@ -16,30 +14,45 @@ class Florence2OCR(BaseOCR):
     name = "florence2"
     _model = None
     _processor = None
+    # Set after a failed model load (e.g. offline host) so we do not retry per region.
+    _load_failed = False
 
     def __init__(self):
         settings = get_settings()
         self.model_id = settings.florence_model_id
         self.device = settings.ocr_device
-        if self.device == "cuda" and not torch.cuda.is_available():
-            self.device = "cpu"
 
     def _load(self) -> None:
         if Florence2OCR._model is not None:
             return
+        if Florence2OCR._load_failed:
+            raise RuntimeError(f"{self.name} model previously failed to load")
+        # Heavy imports are deferred so the API can start without torch installed.
+        import torch
+        from transformers import AutoModelForCausalLM, AutoProcessor
+
+        if self.device == "cuda" and not torch.cuda.is_available():
+            self.device = "cpu"
         logger.info("Loading Florence-2 model: %s on %s", self.model_id, self.device)
-        Florence2OCR._processor = AutoProcessor.from_pretrained(
-            self.model_id, trust_remote_code=True
-        )
-        Florence2OCR._model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-        ).to(self.device)
+        try:
+            Florence2OCR._processor = AutoProcessor.from_pretrained(
+                self.model_id, trust_remote_code=True
+            )
+            Florence2OCR._model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                trust_remote_code=True,
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            ).to(self.device)
+        except Exception:
+            Florence2OCR._load_failed = True
+            raise
         Florence2OCR._model.eval()
 
     def is_available(self) -> bool:
+        if Florence2OCR._load_failed:
+            return False
         try:
+            import torch  # noqa: F401
             import transformers  # noqa: F401
 
             return True
@@ -47,6 +60,8 @@ class Florence2OCR(BaseOCR):
             return False
 
     def extract(self, image: Image.Image) -> OCRResult:
+        import torch
+
         self._load()
         assert Florence2OCR._model is not None and Florence2OCR._processor is not None
 

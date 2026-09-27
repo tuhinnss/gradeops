@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.exceptions import EvaluationError
 from app.db import crud
-from app.db.models import SubmissionStatus
+from app.db.models import Exam, ExamStatus, ReviewStatus, SubmissionStatus
 from app.schemas.evaluation import EvaluationResponse, PlagiarismFlag
 from app.schemas.rubric import RubricSchema
 from app.services.evaluation_engine import EvaluationEngine
@@ -68,7 +68,8 @@ class GradeOpsPipeline:
         if rubric_schema:
             rubric_schema = self._validated_rubric(rubric_schema)
 
-        # FIXED HERE
+        await self._ensure_not_finalized(session, submission)
+
         await crud.update_submission(
             session,
             submission,
@@ -161,13 +162,14 @@ class GradeOpsPipeline:
             "answers": all_answers,
         }
 
+        # Replace (not append) OCR rows from any previous run.
+        await crud.delete_extracted_answers(session, submission_id)
         await crud.save_extracted_answers(
             session,
             submission_id,
             all_answers,
         )
 
-        # FIXED HERE
         await crud.update_submission(
             session,
             submission,
@@ -184,6 +186,17 @@ class GradeOpsPipeline:
         )
 
         return extracted_payload
+
+    @staticmethod
+    async def _ensure_not_finalized(session: AsyncSession, submission) -> None:
+        """Approved/locked/published exams must be reopened before re-grading."""
+        if not submission.exam_id:
+            return
+        exam = await session.get(Exam, submission.exam_id)
+        if exam and exam.status in (ExamStatus.APPROVED, ExamStatus.LOCKED, ExamStatus.PUBLISHED):
+            raise EvaluationError(
+                f"Exam grades are {exam.status.value}; reopen the exam before re-evaluating."
+            )
 
     async def evaluate_submission(
         self,
@@ -205,6 +218,8 @@ class GradeOpsPipeline:
         rubric_schema = self._validated_rubric(
             rubric_schema
         )
+
+        await self._ensure_not_finalized(session, submission)
 
         if not submission.extracted_text:
 
@@ -319,7 +334,7 @@ class GradeOpsPipeline:
 
             annotated_pdf = None
 
-        # FIXED HERE
+        previous_review = submission.review_status
         await crud.update_submission(
             session,
             submission,
@@ -327,7 +342,32 @@ class GradeOpsPipeline:
             evaluation_result=eval_dict,
             total_marks=total,
             annotated_pdf_path=annotated_pdf,
+            # A fresh AI grade always needs a fresh human review.
+            review_status=ReviewStatus.AI_EVALUATED,
+            ai_total_marks=total,
+            ta_total_marks=None,
+            professor_total_marks=None,
+            reviewed_by=None,
+            reviewed_at=None,
+            approved_by=None,
+            approved_at=None,
+            escalation_reason=None,
+            escalation_notes=None,
+            escalated_by=None,
+            escalated_at=None,
+            min_confidence=min((r.confidence for r in results), default=None),
+            needs_manual_grading=any(r.requires_manual_grading for r in results),
         )
+        if previous_review not in (ReviewStatus.NOT_EVALUATED, ReviewStatus.AI_EVALUATED):
+            await crud.add_review_audit(
+                session,
+                submission_id=submission_id,
+                action="re_evaluated",
+                from_status=previous_review.value,
+                to_status=ReviewStatus.AI_EVALUATED.value,
+                notes="AI evaluation re-run; previous human review superseded.",
+                new_marks=total,
+            )
 
         await crud.add_evaluation_log(
             session,
@@ -355,6 +395,7 @@ class GradeOpsPipeline:
         self,
         session: AsyncSession,
         submission_ids: list[uuid.UUID],
+        rubric_schema: RubricSchema | None = None,
     ) -> list[PlagiarismFlag]:
 
         batch = []
@@ -378,4 +419,9 @@ class GradeOpsPipeline:
                     }
                 )
 
-        return self.plagiarism.detect(batch)
+        references = (
+            {i.question_number: " ".join(i.key_points) for i in rubric_schema.items}
+            if rubric_schema
+            else None
+        )
+        return self.plagiarism.detect(batch, references)

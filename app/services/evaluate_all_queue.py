@@ -32,6 +32,7 @@ class EvaluateAllJob:
     rubric_id: uuid.UUID
     submission_ids: list[uuid.UUID]
     run_plagiarism: bool
+    created_by: uuid.UUID | None = None
     status: JobStatus = JobStatus.QUEUED
     total_processed: int = 0
     current: int = 0
@@ -112,7 +113,7 @@ async def run_evaluate_all_job(
                 logger.warning("Plagiarism check after evaluate-all failed: %s", exc)
 
     job.current = total
-    job.status = JobStatus.COMPLETED if job.failed_count == 0 else JobStatus.COMPLETED
+    job.status = JobStatus.COMPLETED
     logger.info(
         "Evaluate-all job %s done: %s succeeded, %s failed of %s",
         job_id,
@@ -128,6 +129,7 @@ def enqueue_evaluate_all(
     submission_ids: list[uuid.UUID],
     run_plagiarism: bool,
     session_factory: async_sessionmaker[AsyncSession],
+    created_by: uuid.UUID | None = None,
 ) -> EvaluateAllJob:
     job_id = uuid.uuid4()
     job = EvaluateAllJob(
@@ -135,8 +137,14 @@ def enqueue_evaluate_all(
         rubric_id=rubric_id,
         submission_ids=submission_ids,
         run_plagiarism=run_plagiarism,
+        created_by=created_by,
         total_processed=len(submission_ids),
     )
     _jobs[job_id] = job
-    asyncio.create_task(run_evaluate_all_job(job_id, session_factory))
+    task = asyncio.create_task(run_evaluate_all_job(job_id, session_factory))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
     return job
+
+
+_tasks: set[asyncio.Task] = set()

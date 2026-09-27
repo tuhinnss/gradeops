@@ -14,6 +14,7 @@ RED = (0.86, 0.15, 0.15)
 GREEN = (0.13, 0.55, 0.13)
 BLUE = (0.1, 0.35, 0.75)
 GRAY = (0.4, 0.4, 0.4)
+COMMENT_WIDTH = 170
 
 
 class PDFAnnotator:
@@ -69,26 +70,31 @@ class PDFAnnotator:
         zoom = settings.pdf_dpi / 72.0
 
         bbox = region["bbox"]
-        x1 = bbox["x1"] / zoom + 8
         y0 = bbox["y0"] / zoom
+        page_w, page_h = page.rect.width, page.rect.height
+        # Rubric-guided regions span the full page width, so "right of the region"
+        # would fall off the page; keep the mark and comment inside the page.
+        x_mark = max(10.0, min(bbox["x1"] / zoom + 8, page_w - COMMENT_WIDTH - 10))
+        y_mark = min(max(y0 + 14, 20), page_h - 30)
 
         mark_color = GREEN if result.marks_awarded >= result.max_marks * 0.6 else RED
         mark_text = f"{result.marks_awarded:.1f}/{result.max_marks:.0f}"
 
         page.insert_text(
-            fitz.Point(x1, max(y0, 20)),
+            fitz.Point(x_mark, y_mark),
             mark_text,
             fontsize=14,
             fontname="helv",
             color=mark_color,
         )
 
-        comment = result.justification[:180]
-        if len(result.justification) > 180:
-            comment += "..."
-
+        text = result.reviewer_comment or result.justification
+        comment = text[:180] + ("..." if len(text) > 180 else "")
+        box = fitz.Rect(x_mark, y_mark + 4, page_w - 10, min(y_mark + 66, page_h - 5))
+        if box.is_empty or box.width < 40:
+            return
         page.insert_textbox(
-            fitz.Rect(x1, y0 + 18, page.rect.width - 20, y0 + 80),
+            box,
             comment,
             fontsize=7,
             fontname="helv",

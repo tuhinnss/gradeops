@@ -1,14 +1,27 @@
-"""Semantic + heuristic evaluation for handwritten exams (OCR-tolerant)."""
+"""Rubric-evidence evaluation for handwritten exams (OCR-tolerant).
+
+Marks are awarded only for rubric criteria that are evidenced in the answer text:
+
+* each key point is worth ``max_marks / n``; a strong match earns the full share,
+  a moderate match earns half;
+* partial-credit rules act as floors (an answer matching "partial explanation → 2"
+  receives at least 2), they are not added on top of key-point marks;
+* negative conditions deduct only on a strong match (avoids OCR false positives).
+
+Length, symbol density and other "effort" heuristics never add marks. They are
+used as evidence that the answer may contain relevant work the matcher could not
+recognise (typically OCR or phrasing mismatch); such answers get a low
+confidence and ``requires_manual_grading`` so the TA queue surfaces them.
+
+Similarity is evidence, not correctness: every AI result is provisional until a
+human reviewer approves or overrides it.
+"""
 
 import logging
-import re
 from dataclasses import dataclass
 
-import numpy as np
-from sentence_transformers import SentenceTransformer, util
-
 from app.config import get_settings
-from app.schemas.evaluation import QuestionResult
+from app.schemas.evaluation import CriterionScore, QuestionResult
 from app.schemas.rubric import RubricItem
 from app.services.answer_quality import (
     AnswerQuality,
@@ -16,6 +29,7 @@ from app.services.answer_quality import (
     effort_based_marks,
     realistic_confidence,
 )
+from app.services.embeddings import encode_normalized
 from app.services.ocr.ocr_service import OCRService
 from app.services.text_utils import (
     adjust_ocr_confidence,
@@ -26,69 +40,78 @@ from app.services.text_utils import (
 
 logger = logging.getLogger(__name__)
 
-# Relaxed thresholds — handwritten OCR rarely matches typed rubric embeddings
-FULL_MATCH = 0.38
-PARTIAL_MATCH = 0.22
-KEYWORD_BOOST = 0.18
-SOFT_MATCH = 0.15
+# Semantic (sentence-embedding cosine) thresholds. all-MiniLM-L6-v2 scores
+# paraphrases ~0.6–0.8, same-topic text ~0.3–0.5 and unrelated text < 0.25.
+FULL_SEMANTIC = 0.55
+PARTIAL_SEMANTIC = 0.40
+# Keyword overlap = share of the criterion's content words present in the answer.
+FULL_KEYWORD = 0.60
+PARTIAL_KEYWORD = 0.35
+SUPPORT_KEYWORD = 0.25
+# Word overlap without semantic agreement is not trusted on its own.
+MIN_SEMANTIC_FOR_KEYWORD_MATCH = 0.30
+
+PARTIAL_POINT_WEIGHT = 0.5
+PENALTY_FRACTION = 0.15
+MAX_PENALTY_FRACTION = 0.4
+
+# Confidence caps for results that need a closer human look.
+LEXICAL_CONFIDENCE_CAP = 0.5
+EVIDENCE_GAP_CONFIDENCE_CAP = 0.45
+MANUAL_GRADING_CONFIDENCE = 0.2
 
 
 @dataclass
 class KeyPointScore:
     point: str
-    similarity: float
+    similarity: float | None
     keyword_score: float
     combined: float
     matched: bool
     partial: bool
 
 
+def _classify(sem: float | None, kw: float) -> tuple[bool, bool]:
+    """Return (full match, partial match) for one criterion."""
+    if sem is None:  # lexical fallback: keyword overlap is the only evidence
+        matched = kw >= FULL_KEYWORD
+        return matched, (not matched and kw >= PARTIAL_KEYWORD)
+    matched = (
+        sem >= FULL_SEMANTIC
+        or (sem >= PARTIAL_SEMANTIC and kw >= SUPPORT_KEYWORD)
+        or (kw >= FULL_KEYWORD and sem >= MIN_SEMANTIC_FOR_KEYWORD_MATCH)
+    )
+    partial = not matched and (
+        sem >= PARTIAL_SEMANTIC
+        or (kw >= PARTIAL_KEYWORD and sem >= MIN_SEMANTIC_FOR_KEYWORD_MATCH)
+    )
+    return matched, partial
+
+
+def _strong_match(sem: float | None, kw: float) -> bool:
+    """Bar for partial-credit rules and penalties (higher than key points)."""
+    if sem is None:
+        return kw >= FULL_KEYWORD
+    return sem >= FULL_SEMANTIC and kw >= PARTIAL_KEYWORD
+
+
 class EvaluationEngine:
-    """
-    Award marks using rubric similarity + handwritten-answer heuristics.
-
-    When OCR noise breaks embedding match, substantive math content still earns
-    partial credit. Blanks remain at zero.
-    """
-
-    _model: SentenceTransformer | None = None
+    """Award marks from rubric evidence; flag low-evidence answers for humans."""
 
     def __init__(self):
         settings = get_settings()
-        self.model_id = settings.embedding_model_id
-        self.similarity_threshold = min(settings.similarity_threshold, FULL_MATCH)
         self.use_llm = settings.use_llm_reasoning and bool(settings.openai_api_key)
         self.ocr = OCRService()
 
-    def _get_model(self) -> SentenceTransformer:
-        if EvaluationEngine._model is None:
-            logger.info("Loading embedding model: %s", self.model_id)
-            EvaluationEngine._model = SentenceTransformer(self.model_id)
-        return EvaluationEngine._model
-
-    def _score_key_point(
-        self, answer_emb, point: str, model: SentenceTransformer, answer_text: str
-    ) -> KeyPointScore:
-        point_emb = model.encode(point, convert_to_tensor=True)
-        sem = float(util.cos_sim(answer_emb, point_emb)[0][0])
-        kw = keyword_overlap_score(answer_text, point)
-        combined = 0.55 * sem + 0.45 * kw
-
-        matched = combined >= FULL_MATCH or (
-            sem >= PARTIAL_MATCH and kw >= KEYWORD_BOOST
-        )
-        partial = not matched and (
-            combined >= SOFT_MATCH or sem >= SOFT_MATCH or kw >= KEYWORD_BOOST
-        )
-
-        return KeyPointScore(
-            point=point,
-            similarity=sem,
-            keyword_score=kw,
-            combined=combined,
-            matched=matched,
-            partial=partial,
-        )
+    @staticmethod
+    def _similarities(answer: str, references: list[str]) -> list[float | None]:
+        """Cosine similarity of the answer to each reference (None if no model)."""
+        if not references:
+            return []
+        vectors = encode_normalized([answer, *references])
+        if vectors is None:
+            return [None] * len(references)
+        return [float(v) for v in vectors[1:] @ vectors[0]]
 
     def evaluate_answer(
         self,
@@ -108,7 +131,6 @@ class EvaluationEngine:
             blank_min_chars=get_settings().blank_answer_min_chars,
         )
 
-        # Truly blank — only case for zero marks with high confidence
         if quality.is_truly_blank or (
             self.ocr.is_blank(student_text) and quality.content_score < 0.15
         ):
@@ -122,81 +144,119 @@ class EvaluationEngine:
                 ),
                 confidence=0.90,
                 is_blank=True,
+                ai_marks_awarded=0.0,
             )
 
         if not rubric_item.key_points:
-            return self._evaluate_without_keypoints(
-                student_text, rubric_item, ocr_adj, quality
-            )
+            return self._manual_grading_result(rubric_item, quality)
 
-        model = self._get_model()
-        answer_emb = model.encode(student_text, convert_to_tensor=True)
+        rules = [r for r in rubric_item.partial_credit_rules if r.condition and r.marks > 0]
+        negatives = [c for c in rubric_item.negative_conditions if c]
+        references = [*rubric_item.key_points, *(r.condition for r in rules), *negatives]
+        sims = self._similarities(student_text, references)
+        lexical_only = bool(sims) and sims[0] is None
+        kp_sims = sims[: len(rubric_item.key_points)]
+        rule_sims = sims[len(rubric_item.key_points) : len(rubric_item.key_points) + len(rules)]
+        neg_sims = sims[len(rubric_item.key_points) + len(rules) :]
 
-        key_scores: list[KeyPointScore] = [
-            self._score_key_point(answer_emb, point, model, student_text)
-            for point in rubric_item.key_points
-        ]
+        key_scores: list[KeyPointScore] = []
+        for point, sem in zip(rubric_item.key_points, kp_sims, strict=True):
+            kw = keyword_overlap_score(student_text, point)
+            matched, partial = _classify(sem, kw)
+            combined = kw if sem is None else 0.55 * sem + 0.45 * kw
+            key_scores.append(KeyPointScore(point, sem, kw, combined, matched, partial))
 
         matched = [ks for ks in key_scores if ks.matched]
         partial = [ks for ks in key_scores if ks.partial]
         missed = [ks for ks in key_scores if not ks.matched and not ks.partial]
 
-        n = max(len(rubric_item.key_points), 1)
-        marks_per_point = max_marks / n
-        rubric_marks = len(matched) * marks_per_point + len(partial) * (
-            marks_per_point * 0.55
-        )
+        marks_per_point = max_marks / max(len(rubric_item.key_points), 1)
+        criteria: list[CriterionScore] = []
+        for ks in key_scores:
+            share = marks_per_point if ks.matched else marks_per_point * PARTIAL_POINT_WEIGHT if ks.partial else 0.0
+            criteria.append(
+                CriterionScore(
+                    criterion=ks.point,
+                    kind="key_point",
+                    max_marks=round(marks_per_point, 2),
+                    awarded=round(share, 2),
+                    status="met" if ks.matched else "partial" if ks.partial else "missed",
+                    semantic_similarity=None if ks.similarity is None else round(ks.similarity, 3),
+                    keyword_overlap=round(ks.keyword_score, 3),
+                )
+            )
+        key_point_marks = len(matched) * marks_per_point + len(partial) * marks_per_point * PARTIAL_POINT_WEIGHT
 
-        partial_bonus = self._apply_partial_rules(student_text, rubric_item, model)
-        negative_deduction = self._apply_negative_conditions(
-            student_text, rubric_item, model
-        )
+        # Partial-credit rules are floors, not bonuses.
+        rule_floor = 0.0
+        applied_rules: list[str] = []
+        for rule, sem in zip(rules, rule_sims, strict=True):
+            kw = keyword_overlap_score(student_text, rule.condition)
+            applied = _strong_match(sem, kw)
+            rule_marks = min(rule.marks, max_marks)
+            if applied:
+                rule_floor = max(rule_floor, rule_marks)
+                applied_rules.append(rule.condition)
+            criteria.append(
+                CriterionScore(
+                    criterion=rule.condition,
+                    kind="partial_rule",
+                    max_marks=rule_marks,
+                    awarded=rule_marks if applied else 0.0,
+                    status="applied" if applied else "not_applied",
+                    semantic_similarity=None if sem is None else round(sem, 3),
+                    keyword_overlap=round(kw, 3),
+                )
+            )
 
-        rubric_marks = max(0.0, rubric_marks + partial_bonus - negative_deduction)
+        deduction = 0.0
+        triggered: list[str] = []
+        for condition, sem in zip(negatives, neg_sims, strict=True):
+            kw = keyword_overlap_score(student_text, condition)
+            applied = _strong_match(sem, kw)
+            if applied:
+                deduction += max_marks * PENALTY_FRACTION
+                triggered.append(condition)
+            criteria.append(
+                CriterionScore(
+                    criterion=condition,
+                    kind="penalty",
+                    max_marks=round(max_marks * PENALTY_FRACTION, 2),
+                    awarded=-round(max_marks * PENALTY_FRACTION, 2) if applied else 0.0,
+                    status="applied" if applied else "not_applied",
+                    semantic_similarity=None if sem is None else round(sem, 3),
+                    keyword_overlap=round(kw, 3),
+                )
+            )
+        deduction = min(deduction, max_marks * MAX_PENALTY_FRACTION)
 
-        # Heuristic partial credit for handwritten math (OCR-tolerant)
+        raw = max(key_point_marks, rule_floor) - deduction
+        marks_awarded = round_marks(max(0.0, min(max_marks, raw)))
+
+        # Effort is evidence for review, never for marks: substantive working that
+        # the matcher could not tie to the rubric needs a human decision.
         effort_marks = effort_based_marks(max_marks, quality)
+        evidence_gap = effort_marks - marks_awarded >= 0.25 * max_marks
 
-        # Blend: take the better of rubric alignment vs demonstrated working
-        if rubric_marks < effort_marks * 0.5 and quality.is_handwritten_math:
-            marks_awarded = effort_marks
-        else:
-            marks_awarded = max(rubric_marks, effort_marks * 0.75)
-
-        # Cap: effort alone cannot exceed 85% of max
-        if rubric_marks < marks_per_point * 0.5:
-            marks_awarded = min(marks_awarded, max_marks * 0.85)
-
-        marks_awarded = round_marks(max(0.0, min(max_marks, marks_awarded)))
-
-        confidence = realistic_confidence(
-            quality, ocr_adj, marks_awarded, max_marks
-        )
+        confidence = realistic_confidence(quality, ocr_adj, marks_awarded, max_marks)
+        if lexical_only:
+            confidence = min(confidence, LEXICAL_CONFIDENCE_CAP)
+        if evidence_gap:
+            confidence = min(confidence, EVIDENCE_GAP_CONFIDENCE_CAP)
 
         justification = self._build_justification(
-            rubric_item,
-            matched,
-            partial,
-            missed,
-            marks_awarded,
-            negative_deduction,
-            quality,
+            rubric_item, matched, partial, missed, marks_awarded, deduction,
+            applied_rules, evidence_gap, lexical_only,
         )
-
         if self.use_llm:
             justification = self._enhance_with_llm(
                 student_text, rubric_item, marks_awarded, justification
             )
 
         logger.debug(
-            "%s marks=%.1f/%.1f content=%.2f rubric=%.1f effort=%.1f kw=%.2f",
-            q_label,
-            marks_awarded,
-            max_marks,
-            quality.content_score,
-            rubric_marks,
-            effort_marks,
-            quality.keyword_best,
+            "%s marks=%.1f/%.1f kp=%.1f rule=%.1f penalty=%.1f effort=%.1f gap=%s lexical=%s",
+            q_label, marks_awarded, max_marks, key_point_marks, rule_floor,
+            deduction, effort_marks, evidence_gap, lexical_only,
         )
 
         return QuestionResult(
@@ -204,146 +264,82 @@ class EvaluationEngine:
             marks_awarded=marks_awarded,
             max_marks=max_marks,
             justification=justification,
-            confidence=confidence,
+            confidence=round(confidence, 3),
             is_blank=False,
             key_points_matched=[ks.point for ks in matched],
+            key_points_partial=[ks.point for ks in partial],
             key_points_missed=[ks.point for ks in missed],
-            negative_triggers=(
-                rubric_item.negative_conditions[:2] if negative_deduction > 0 else []
-            ),
+            negative_triggers=triggered,
+            criteria=criteria,
+            requires_manual_grading=evidence_gap,
+            ai_marks_awarded=marks_awarded,
+            scoring_method="lexical" if lexical_only else "semantic",
         )
 
-    def _evaluate_without_keypoints(
-        self,
-        student_text: str,
-        rubric_item: RubricItem,
-        ocr_confidence: float,
-        quality: AnswerQuality,
+    def _manual_grading_result(
+        self, rubric_item: RubricItem, quality: AnswerQuality
     ) -> QuestionResult:
-        """Score questions with no rubric bullets using content heuristics only."""
-        marks = round_marks(
-            min(
-                rubric_item.max_marks * 0.85,
-                effort_based_marks(rubric_item.max_marks, quality),
-            )
-        )
-        confidence = realistic_confidence(
-            quality, ocr_confidence, marks, rubric_item.max_marks
-        )
-        justification = (
-            f"{rubric_item.question_number}: {marks:.1f} / {rubric_item.max_marks:.1f} marks. "
-            "Graded on visible mathematical working and OCR-readable content "
-            f"(content strength {quality.content_score:.0%})."
-        )
+        """No rubric criteria to compare against: the AI cannot judge correctness."""
         return QuestionResult(
             question=rubric_item.question_number,
-            marks_awarded=marks,
+            marks_awarded=0.0,
             max_marks=rubric_item.max_marks,
-            justification=justification,
-            confidence=confidence,
+            justification=(
+                f"{rubric_item.question_number}: The rubric has no key points for this "
+                "question, so the AI cannot assess correctness. No marks were awarded "
+                "automatically — manual grading required "
+                f"(answer contains readable content, strength {quality.content_score:.0%})."
+            ),
+            confidence=MANUAL_GRADING_CONFIDENCE,
+            requires_manual_grading=True,
+            ai_marks_awarded=0.0,
         )
 
-    def _apply_partial_rules(
-        self, student_text: str, rubric_item: RubricItem, model: SentenceTransformer
-    ) -> float:
-        bonus = 0.0
-        if not rubric_item.partial_credit_rules:
-            return bonus
-
-        answer_emb = model.encode(student_text, convert_to_tensor=True)
-        for rule in rubric_item.partial_credit_rules:
-            if not rule.condition or rule.marks <= 0:
-                continue
-            rule_emb = model.encode(rule.condition, convert_to_tensor=True)
-            sem = float(util.cos_sim(answer_emb, rule_emb)[0][0])
-            kw = keyword_overlap_score(student_text, rule.condition)
-            if sem >= SOFT_MATCH or kw >= KEYWORD_BOOST:
-                bonus += min(rule.marks, rubric_item.max_marks * 0.5)
-        return min(bonus, rubric_item.max_marks * 0.5)
-
-    def _apply_negative_conditions(
-        self, student_text: str, rubric_item: RubricItem, model: SentenceTransformer
-    ) -> float:
-        if not rubric_item.negative_conditions:
-            return 0.0
-
-        answer_emb = model.encode(student_text, convert_to_tensor=True)
-        penalty_per = rubric_item.max_marks * 0.15
-        deduction = 0.0
-
-        for condition in rubric_item.negative_conditions:
-            cond_emb = model.encode(condition, convert_to_tensor=True)
-            sem = float(util.cos_sim(answer_emb, cond_emb)[0][0])
-            kw = keyword_overlap_score(student_text, condition)
-            # Higher bar for penalties — avoid false deductions on noisy OCR
-            if sem >= FULL_MATCH and kw >= 0.35:
-                deduction += penalty_per
-
-        return min(deduction, rubric_item.max_marks * 0.4)
-
+    @staticmethod
     def _build_justification(
-        self,
         rubric_item: RubricItem,
         matched: list[KeyPointScore],
         partial: list[KeyPointScore],
         missed: list[KeyPointScore],
         marks: float,
         deduction: float,
-        quality: AnswerQuality,
+        applied_rules: list[str],
+        evidence_gap: bool,
+        lexical_only: bool,
     ) -> str:
-        ratio = marks / rubric_item.max_marks if rubric_item.max_marks else 0.0
-        parts: list[str] = []
-
+        q = rubric_item.question_number
+        mx = rubric_item.max_marks
+        ratio = marks / mx if mx else 0.0
         if ratio >= 0.85:
-            parts.append(
-                f"{rubric_item.question_number}: Strong response ({marks:.1f}/{rubric_item.max_marks:.1f}). "
-                "Key ideas align well with the marking scheme."
-            )
+            parts = [f"{q}: Strong response ({marks:.1f}/{mx:.1f})."]
         elif ratio >= 0.5:
-            parts.append(
-                f"{rubric_item.question_number}: Satisfactory ({marks:.1f}/{rubric_item.max_marks:.1f}). "
-                "Core ideas present with some gaps or OCR ambiguity."
-            )
+            parts = [f"{q}: Satisfactory ({marks:.1f}/{mx:.1f}); some rubric criteria not evidenced."]
         elif marks > 0:
-            parts.append(
-                f"{rubric_item.question_number}: Partial credit ({marks:.1f}/{rubric_item.max_marks:.1f}). "
-            )
-            if quality.is_handwritten_math:
-                parts.append(
-                    "Handwritten mathematical working is visible "
-                    f"(symbols/steps detected; content score {quality.content_score:.0%}). "
-                    "Exact rubric phrasing match limited by OCR — partial marks awarded for demonstrated effort."
-                )
-            else:
-                parts.append(
-                    "Some relevant content identified; answer incomplete versus rubric."
-                )
+            parts = [f"{q}: Partial credit ({marks:.1f}/{mx:.1f})."]
         else:
-            parts.append(
-                f"{rubric_item.question_number}: Minimal credit ({marks:.1f}/{rubric_item.max_marks:.1f}). "
-                "Response does not meet rubric criteria."
-            )
+            parts = [f"{q}: No marks ({marks:.1f}/{mx:.1f}); rubric criteria were not identified in the answer text."]
+
+        def _list(points: list[KeyPointScore]) -> str:
+            shown = "; ".join(p.point[:60] for p in points[:3])
+            return shown + (f" (+{len(points) - 3} more)" if len(points) > 3 else "")
 
         if matched:
-            parts.append(
-                "Criteria met: "
-                + "; ".join(ks.point[:55] for ks in matched[:2])
-                + ("." if len(matched) <= 2 else f" (+{len(matched) - 2} more).")
-            )
-        elif partial and marks > 0:
-            parts.append(
-                "Partial alignment: "
-                + "; ".join(ks.point[:50] for ks in partial[:2])
-                + "."
-            )
-        elif missed and marks == 0:
-            parts.append(
-                "Expected topics not clearly identified in OCR text."
-            )
-
+            parts.append(f"Met: {_list(matched)}.")
+        if partial:
+            parts.append(f"Partially addressed: {_list(partial)}.")
+        if missed:
+            parts.append(f"Not found: {_list(missed)}.")
+        if applied_rules:
+            parts.append(f"Partial-credit rule applied: {applied_rules[0][:60]}.")
         if deduction > 0:
             parts.append(f"Penalty: −{deduction:.1f} marks per rubric conditions.")
-
+        if evidence_gap:
+            parts.append(
+                "The answer contains substantive working that could not be matched to the "
+                "rubric (possible OCR or phrasing mismatch) — verify manually."
+            )
+        if lexical_only:
+            parts.append("Semantic model unavailable: keyword matching only.")
         return " ".join(parts)
 
     def _enhance_with_llm(
@@ -393,9 +389,7 @@ class EvaluationEngine:
         answers: list[dict],
         rubric_items: list[RubricItem],
     ) -> list[QuestionResult]:
-        """
-        One result per rubric question; totals sum cleanly for the API response.
-        """
+        """One result per rubric question; totals sum cleanly for the API response."""
         from app.services.text_utils import merge_answers_by_question
 
         rubric_q = [r.question_number for r in rubric_items]
@@ -404,27 +398,12 @@ class EvaluationEngine:
 
         results: list[QuestionResult] = []
         for item in rubric_items:
-            label = item.question_number.upper()
-            ans = answer_map.get(label)
+            ans = answer_map.get(item.question_number.upper())
             if not ans:
-                results.append(
-                    self.evaluate_answer("", item, ocr_confidence=0.0)
-                )
+                results.append(self.evaluate_answer("", item, ocr_confidence=0.0))
                 continue
-
             text = ans.get("extracted_text", "")
-            ocr_conf = float(ans.get("ocr_confidence", 0.5))
-
-            # Do not trust OCR is_blank alone — handwriting may be misclassified
-            if ans.get("is_blank") and len(clean_ocr_text(text)) > 20:
-                logger.debug(
-                    "%s: OCR flagged blank but text len=%d — re-evaluating",
-                    label,
-                    len(text),
-                )
-
-            results.append(
-                self.evaluate_answer(text, item, ocr_confidence=ocr_conf)
-            )
-
+            ocr_conf = float(ans.get("ocr_confidence", 0.5) or 0.5)
+            results.append(self.evaluate_answer(text, item, ocr_confidence=ocr_conf))
         return results
+
