@@ -17,9 +17,27 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+DEFAULT_JWT_SECRETS = {"change-me-in-production-use-openssl-rand", "change-me-in-production"}
+
+
+def check_security_settings() -> None:
+    if settings.auth_enabled and settings.jwt_secret_key in DEFAULT_JWT_SECRETS:
+        if settings.environment == "production":
+            raise RuntimeError("JWT_SECRET_KEY must be set to a random value in production")
+        logger.warning("JWT_SECRET_KEY is the default value — set a random secret before deploying")
+    if not settings.auth_enabled:
+        if settings.environment == "production":
+            raise RuntimeError("AUTH_ENABLED=false is not allowed in production")
+        logger.warning(
+            "AUTH_ENABLED=false: legacy workbench endpoints are open to anonymous users "
+            "(local demo mode). Role dashboards still require login."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(settings.debug)
+    check_security_settings()
     await init_db()
     yield
 
@@ -37,6 +55,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Read by the dashboard: CSV download names and answer-image page/crop info.
+    expose_headers=["Content-Disposition", "X-Page-Index", "X-Cropped"],
 )
 
 app.include_router(api_router, prefix=settings.api_prefix)
